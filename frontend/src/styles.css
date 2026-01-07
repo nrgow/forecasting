@@ -27,7 +27,7 @@ body {
 }
 
 .page {
-  max-width: 1200px;
+  max-width: 90vw;
   margin: 0 auto;
   padding: 48px 24px 72px;
   display: flex;
@@ -64,29 +64,6 @@ h1 {
   max-width: 480px;
 }
 
-.stats {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(120px, 1fr));
-  gap: 12px;
-  padding: 16px;
-  background: var(--paper);
-  border-radius: 16px;
-  box-shadow: 0 16px 40px var(--shadow);
-}
-
-.stat-label {
-  display: block;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--ink-soft);
-}
-
-.stat-value {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--accent);
-}
 
 .panel {
   background: var(--paper);
@@ -111,11 +88,13 @@ h1 {
 }
 
 .table-wrap {
-  overflow-x: auto;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 14px;
 }
@@ -131,6 +110,10 @@ td {
   text-align: left;
   vertical-align: top;
   border-bottom: 1px solid var(--line);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 th {
@@ -139,8 +122,43 @@ th {
   letter-spacing: 0.12em;
 }
 
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sort-button:focus-visible {
+  outline: 2px solid #fff6ed;
+  outline-offset: 3px;
+}
+
+.sort-indicator {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+
 tbody tr:hover {
   background: #fff2e7;
+}
+
+td[data-col="event_group_id"],
+td[data-col="event_urls"] {
+  max-width: 320px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 @media (max-width: 900px) {
@@ -149,7 +167,4 @@ tbody tr:hover {
     align-items: flex-start;
   }
 
-  .stats {
-    width: 100%;
-  }
 }
