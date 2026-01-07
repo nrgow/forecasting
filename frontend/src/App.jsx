@@ -7,6 +7,8 @@ import {
 } from "@tanstack/react-table";
 
 const EMPTY_LIST = [];
+const TOOLTIP_LENGTH = 40;
+const WRAPPED_COLUMNS = new Set(["event_group_id", "event_urls"]);
 
 export default function App() {
   const [rows, setRows] = useState(EMPTY_LIST);
@@ -65,7 +67,7 @@ export default function App() {
     return orderedKeys.map((key) => ({
       accessorKey: key,
       header: key,
-      cell: (info) => formatCellValue(info.getValue()),
+      cell: (info) => formatCellValue(info.column.id, info.getValue()),
       enableSorting: true
     }));
   }, [rows]);
@@ -81,9 +83,31 @@ export default function App() {
     getSortedRowModel: getSortedRowModel()
   });
 
-  function formatCellValue(value) {
+  function formatCellValue(key, value) {
     if (value === null || value === undefined) {
       return "";
+    }
+
+    if (key === "event_urls") {
+      const urls = String(value)
+        .split("\n")
+        .map((url) => url.trim())
+        .filter((url) => url.length > 0);
+
+      return (
+        <div className="event-url-list">
+          {urls.map((url, index) => (
+            <a
+              key={`${url}-${index}`}
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {url}
+            </a>
+          ))}
+        </div>
+      );
     }
 
     if (typeof value === "number") {
@@ -97,7 +121,21 @@ export default function App() {
       return JSON.stringify(value);
     }
 
-    return String(value);
+    const text = String(value);
+
+    if (WRAPPED_COLUMNS.has(key)) {
+      return text;
+    }
+
+    if (text.length > TOOLTIP_LENGTH) {
+      return (
+        <span className="cell-tooltip" data-tooltip={text}>
+          <span className="cell-clip">{text}</span>
+        </span>
+      );
+    }
+
+    return <span className="cell-clip">{text}</span>;
   }
 
   return (

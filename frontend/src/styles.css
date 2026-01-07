@@ -205,8 +205,6 @@ td {
   vertical-align: top;
   border-bottom: 1px solid rgba(255, 199, 64, 0.2);
   max-width: 280px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -214,6 +212,12 @@ th {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.18em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+td {
+  overflow: visible;
 }
 
 .sort-button {
@@ -269,6 +273,81 @@ td[data-col="event_urls"] {
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.cell-clip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.cell-tooltip {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.cell-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  max-width: 380px;
+  width: max-content;
+  background: rgba(6, 8, 10, 0.98);
+  border: 1px solid var(--terminal-line);
+  color: var(--terminal-ink);
+  box-shadow: 0 18px 35px rgba(0, 0, 0, 0.5);
+  white-space: normal;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 150ms ease, transform 150ms ease;
+  z-index: 3;
+}
+
+.cell-tooltip::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: calc(100% + 2px);
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-bottom: 6px solid rgba(6, 8, 10, 0.98);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 150ms ease, transform 150ms ease;
+  z-index: 3;
+}
+
+.cell-tooltip:hover::after,
+.cell-tooltip:hover::before {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.event-url-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.event-url-list a {
+  color: var(--terminal-accent-strong);
+  text-decoration: none;
+}
+
+.event-url-list a:hover {
+  color: var(--terminal-accent);
+  text-decoration: underline;
 }
 
 @media (max-width: 900px) {
