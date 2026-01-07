@@ -46,12 +46,15 @@ export default function App() {
     };
   }, []);
 
-  const columns = useMemo(() => {
+  const { columns, numericColumns } = useMemo(() => {
     if (rows.length === 0) {
-      return [];
+      return { columns: [], numericColumns: new Set() };
     }
 
     const keys = Object.keys(rows[0]);
+    const numericColumns = new Set(
+      keys.filter((key) => rows.some((row) => typeof row[key] === "number"))
+    );
     const focusKeys = ["event_names", "event_urls"];
     const baseKeys = keys.filter((key) => !focusKeys.includes(key));
     const orderedKeys = [...baseKeys];
@@ -64,12 +67,15 @@ export default function App() {
       orderedKeys.splice(2, 0, "event_urls");
     }
 
-    return orderedKeys.map((key) => ({
-      accessorKey: key,
-      header: key,
-      cell: (info) => formatCellValue(info.column.id, info.getValue()),
-      enableSorting: true
-    }));
+    return {
+      columns: orderedKeys.map((key) => ({
+        accessorKey: key,
+        header: key,
+        cell: (info) => formatCellValue(info.column.id, info.getValue()),
+        enableSorting: true
+      })),
+      numericColumns
+    };
   }, [rows]);
 
   const table = useReactTable({
@@ -111,10 +117,7 @@ export default function App() {
     }
 
     if (typeof value === "number") {
-      if (Number.isInteger(value)) {
-        return String(value);
-      }
-      return String(Number(value.toFixed(2)));
+      return value.toFixed(2);
     }
 
     if (typeof value === "object") {
@@ -167,7 +170,15 @@ export default function App() {
                 {table.getHeaderGroups().map((headerGroup) => (
                   <tr key={headerGroup.id}>
                     {headerGroup.headers.map((header) => (
-                      <th key={header.id} data-col={header.column.id}>
+                      <th
+                        key={header.id}
+                        data-col={header.column.id}
+                        className={
+                          numericColumns.has(header.column.id)
+                            ? "numeric-col"
+                            : undefined
+                        }
+                      >
                         {header.isPlaceholder ? null : (
                           <button
                             className="sort-button"
@@ -196,7 +207,15 @@ export default function App() {
                 {table.getRowModel().rows.map((row) => (
                   <tr key={row.id}>
                     {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id} data-col={cell.column.id}>
+                      <td
+                        key={cell.id}
+                        data-col={cell.column.id}
+                        className={
+                          numericColumns.has(cell.column.id)
+                            ? "numeric-col"
+                            : undefined
+                        }
+                      >
                         {flexRender(
                           cell.column.columnDef.cell,
                           cell.getContext()

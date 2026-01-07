@@ -216,6 +216,16 @@ th {
   text-overflow: ellipsis;
 }
 
+th.numeric-col,
+td.numeric-col {
+  text-align: right;
+}
+
+th.numeric-col .sort-button {
+  justify-content: flex-end;
+  text-align: right;
+}
+
 td {
   overflow: visible;
 }
