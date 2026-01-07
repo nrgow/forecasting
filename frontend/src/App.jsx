@@ -102,9 +102,13 @@ export default function App() {
 
   return (
     <div className="page">
-      <header className="hero">
-        <div>
-          <h1>Event Stats Table</h1>
+      <header className="terminal-bar">
+        <div className="terminal-brand">
+          <div className="brand-badge">NT</div>
+          <div>
+            <p className="brand-title">NEWSTALK TERMINAL</p>
+            <p className="brand-subtitle">Event stats feed</p>
+          </div>
         </div>
       </header>
 
