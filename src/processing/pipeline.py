@@ -90,7 +90,7 @@ def generate_event_table(
             event_urls = "\n".join([e.url() for e in event_group.events])
             event_names = "\n".join([e.title for e in event_group.events])
             yes_probs: list[float] = list(filter(None, [m.yes_probability() for m in event_group_open_markets]))
-            max_uncertainty = max(abs(0.5 - yes_prob) for yes_prob in yes_probs) if yes_probs else None
+            max_uncertainty = max(4*yes_prob*(1 - yes_prob) for yes_prob in yes_probs) if yes_probs else None
             event_group_id = event_group.id()
             event_group_geopol_prob = event_geopol_prob.get(event_group_id)
             print(
