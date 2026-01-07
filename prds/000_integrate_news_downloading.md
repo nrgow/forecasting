@@ -1,0 +1,2 @@
+Add to @src/processing/run_pipeline.py an extra step in the run_pipeline method that downloads the week's news. Make sure that the data path is an appropriate subfolder of /mnt/ssd/
+You can implement a new method in the NewsDownloader in @src/news_data.py.

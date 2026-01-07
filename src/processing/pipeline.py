@@ -8,6 +8,7 @@ import tqdm
 
 from ..news_enrichment import ZeroShotClassifier
 from ..prediction_markets import Events, PolymarketApi
+from ..news_data import NewsDownloader
 
 
 def fetch_polymarkets_events(
@@ -109,3 +110,8 @@ def generate_event_table(
                 file=o
             )
     logging.info(f"Wrote {output_path}")
+
+
+def download_news_past_week(news_base_path):
+    for _ in NewsDownloader(news_base_path).download_past_week():
+        pass

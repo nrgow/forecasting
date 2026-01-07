@@ -1,0 +1,135 @@
+import logging
+from dataclasses import dataclass, field
+
+import dspy
+
+#import src.gdelt_api as gdelt_api
+import .tools as tools
+
+
+@dataclass
+class Event:
+    date: str
+    description: str
+    source: str | None
+
+
+@dataclass
+class EventStore:
+    events: list[Event] = field(default_factory=list)
+
+    def add_event(self, event: Event):
+        self.events.append(event)
+
+
+class ExtractEvents(dspy.Signature):
+    topic_pertaining_to: str = dspy.InputField()
+    content: str = dspy.InputField()
+    events: list[Event] = dspy.OutputField()
+
+
+class EventsToTimeline(dspy.Signature):
+    topic_pertaining_to: str = dspy.InputField()
+    events: list[Event] = dspy.InputField()
+    timeline: str = dspy.OutputField()
+
+
+class EventsTimeline(dspy.Signature):
+    topic_pertaining_to: str = dspy.InputField()
+    time_until: str = dspy.InputField()
+    timeline: str = dspy.OutputField()
+
+
+class SpecificEventsTimeline(dspy.Signature):
+    topic_pertaining_to: str = dspy.InputField()
+    subtopic_pertaining_to: str = dspy.InputField()
+    date: str = dspy.InputField()
+    timeline: str = dspy.OutputField()
+
+
+@dataclass
+class Subtimeline:
+    subtopic_pertaining_to: str
+    date: str
+    subtimeline: str
+
+
+class MergeTimelines(dspy.Signature):
+    overall_topic_pertaining_to: str = dspy.InputField()
+    subtimelines: list[Subtimeline] = dspy.InputField()
+    merged_timeline: str = dspy.OutputField(
+        desc="The merged timeline containing all the information in the subtimelines but arranged chronologically and narrative flow"
+    )
+
+
+def generate_present_timeline(
+    topic_pertaining_to: str,
+    time_until="2025-12-02",
+    model="openrouter/x-ai/grok-4.1-fast:free",
+):
+    dspy.configure(lm=dspy.LM(model))
+
+    wiki = tools.CachedWikipedia()
+    #news_api = gdelt_api.GDELTDocAPI()
+
+    loop = dspy.ReAct(
+        EventsTimeline,
+        tools=[
+            wiki.get_wikipedia_page,
+            wiki.search_wikipedia_pages,
+            #news_api.news_search,
+            # tools.fetch_webpage_content,
+        ],
+        max_iters=5,
+    )
+
+    first_timeline = loop(
+        topic_pertaining_to=topic_pertaining_to, time_until=time_until
+    )
+
+    timeline_extraction = dspy.Predict(ExtractEvents)
+
+    extracted_events = timeline_extraction(
+        topic_pertaining_to=topic_pertaining_to, content=first_timeline.timeline
+    )
+
+    sub_loop = dspy.ReAct(
+        SpecificEventsTimeline,
+        tools=[
+            wiki.get_wikipedia_page,
+            wiki.search_wikipedia_pages,
+            #news_api.news_search,
+            #tools.fetch_webpage_content,
+        ],
+        max_iters=5,
+    )
+
+    subtimelines = []
+    for event in extracted_events.events:
+        logging.info("Generating sub timeline for %s", event.description)
+        subtimeline = sub_loop(
+            topic_pertaining_to=topic_pertaining_to,
+            subtopic_pertaining_to=event.description,
+            date=event.date,
+        )
+        subtimelines.append(subtimeline)
+
+    merge = dspy.ChainOfThought(MergeTimelines)
+    merged = merge(
+        overall_topic_pertaining_to=topic_pertaining_to,
+        subtimelines=[
+            Subtimeline(
+                subtopic_pertaining_to=event.description,
+                date=event.date,
+                subtimeline=st.timeline,
+            )
+            for event, st in zip(extracted_events.events, subtimelines)
+        ],
+    )
+    output = {
+        "first_timeline": first_timeline.toDict(),
+        "extracted_events": extracted_events.toDict(),
+        "subtimelines": [st.toDict() for st in subtimelines],
+        "merged": merged.toDict(),
+    }
+    return output

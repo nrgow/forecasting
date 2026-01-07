@@ -30,4 +30,5 @@ dependencies = [
     "xformers>=0.0.32.post2",
     "python-slugify>=8.0.4",
     "fastapi>=0.128.0",
+    "wikipedia>=1.4.0",
 ]
