@@ -1,10 +1,11 @@
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 import dspy
+import datetime as dt
 
 #import src.gdelt_api as gdelt_api
-import .tools as tools
+from . import tools
 
 
 @dataclass
@@ -64,8 +65,8 @@ class MergeTimelines(dspy.Signature):
 
 def generate_present_timeline(
     topic_pertaining_to: str,
-    time_until="2025-12-02",
-    model="openrouter/x-ai/grok-4.1-fast:free",
+    time_until=str(dt.date.today()),
+    model="openrouter/x-ai/grok-4.1-fast",
 ):
     dspy.configure(lm=dspy.LM(model))
 
@@ -80,7 +81,7 @@ def generate_present_timeline(
             #news_api.news_search,
             # tools.fetch_webpage_content,
         ],
-        max_iters=5,
+        max_iters=8,
     )
 
     first_timeline = loop(
@@ -132,4 +133,5 @@ def generate_present_timeline(
         "subtimelines": [st.toDict() for st in subtimelines],
         "merged": merged.toDict(),
     }
+    output["extracted_events"]["events"] = [asdict(e) for e in output["extracted_events"]["events"]]
     return output

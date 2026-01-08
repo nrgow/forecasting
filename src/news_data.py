@@ -130,6 +130,9 @@ class NewsDownloader:
         yield d, p
         d = d.prev()
         while d >= datetime_to:
-            p = self.download(d)
-            yield d, p
+            try:
+                p = self.download(d)
+                yield d, p
+            except:
+                pass            
             d = d.prev()

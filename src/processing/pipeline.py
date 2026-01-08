@@ -113,5 +113,6 @@ def generate_event_table(
 
 
 def download_news_past_week(news_base_path):
+    """Download the past week of news into the base path."""
     for _ in NewsDownloader(news_base_path).download_past_week():
         pass
