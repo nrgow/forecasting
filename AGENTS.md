@@ -1,0 +1,3 @@
+- The Python part of the project is managed with `uv`. Dependencies can be added via `uv add` and code should be run by `uv run`.
+- In Python, when writing a class or method, always add a short docstring.
+- Avoid defensive programming. Prefer dict[key] over dict.get(key, ""). Allow errors to propagate rather than trying to silently repair errors.
