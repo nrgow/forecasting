@@ -105,6 +105,17 @@ class Event:
         return self.id == other.id
 
 
+def parse_open_market_end_date(value: str) -> dt.datetime:
+    """Parse an open market end date into a timezone-aware datetime."""
+    if "T" in value:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return dt.datetime.combine(
+        dt.date.fromisoformat(value),
+        dt.time.min,
+        tzinfo=dt.timezone.utc,
+    )
+
+
 class Events(list[Event]):
     @classmethod
     def from_file(cls, p: Path):
@@ -189,8 +200,18 @@ class EventGroup:
         return slugify(self.template_title)
 
     def open_markets(self) -> Iterable["OpenMarket"]:
+        """Yield all open markets in the event group."""
         for event in self.events:
             yield from event.open_markets
+
+    def latest_open_market_end_date(self) -> dt.datetime | None:
+        """Return the latest end date across open markets."""
+        end_dates = [
+            parse_open_market_end_date(market.end_date)
+            for market in self.open_markets()
+            if market.end_date is not None
+        ]
+        return max(end_dates) if end_dates else None
 
 
 class EventGroups(list[EventGroup]):

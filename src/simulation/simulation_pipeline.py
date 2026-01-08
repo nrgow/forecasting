@@ -212,7 +212,7 @@ class RealtimeEstimationService:
                         relevant_articles.append(article)
             if not relevant_articles:
                 continue
-            scenario = build_event_group_prompt(event_group)
+            scenario = build_future_timeline_prompt(event_group)
             contexts = list(islice((a.prompt_text() for a in relevant_articles), 50))
             timeline_output = self.estimator.generate(
                 scenario=scenario,
@@ -268,6 +268,16 @@ def build_event_group_prompt(event_group: EventGroup) -> str:
     unique_descriptions = list(mit.unique_everseen(descriptions))
     description_text = "\n\n".join(unique_descriptions)
     return f"{event_group.template_title}\n\n{description_text}".strip()
+
+
+def build_future_timeline_prompt(event_group: EventGroup) -> str:
+    """Build a prompt for future timeline generation bounded by market end dates."""
+    base_prompt = build_event_group_prompt(event_group)
+    latest_end_date = event_group.latest_open_market_end_date()
+    if latest_end_date is None:
+        return base_prompt
+    event_date = latest_end_date.date().isoformat()
+    return f"{base_prompt}\n\nGenerate the future timeline only up to {event_date}."
 
 
 def parse_news_datetime(value: str) -> dt.datetime:
@@ -364,8 +374,8 @@ def run_realtime_simulation_pipeline(
     news_base_path: Path,
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
-    timeline_models: list[str] | None = None,
-    timeline_temps: list[float] | None = None,
+    timeline_models: list[str] | None = ["openrouter/x-ai/grok-4.1-fast"],
+    timeline_temps: list[float] | None = [0.7],
     batch_size: int = 25,
 ) -> dict:
     """Run the real-time simulation pipeline for active event groups."""

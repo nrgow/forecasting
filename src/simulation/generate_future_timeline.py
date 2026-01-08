@@ -74,11 +74,11 @@ def generate_future_timeline(
         contexts.append(context)
 
     models = [
-        "openrouter/anthropic/claude-opus-4.5",
-        "openrouter/openrouter/bert-nebulon-alpha",
-        # "openrouter/x-ai/grok-4.1-fast:free",
-        # "openrouter/google/gemini-3-pro-preview",
-        # "openrouter/openai/gpt-5.1",
+        #"openrouter/anthropic/claude-opus-4.5",
+        #"openrouter/openrouter/bert-nebulon-alpha",
+        "openrouter/x-ai/grok-4.1-fast",
+        #"openrouter/google/gemini-3-pro-preview",
+        #"openrouter/openai/gpt-5.1",
     ]
     prediction_function = partial(
         run_model,

@@ -5,10 +5,13 @@ from .pipeline import (
     generate_event_table,
     classify_event_geopol_prob,
     download_news_past_week,
+    download_news_past_day,
+)
+from ..simulation.simulation_pipeline import (
     run_present_timeline_pipeline,
     run_realtime_simulation_pipeline,
+    run_simulation_pipeline,
 )
-
 
 def run_pipeline():
     """Run the end-to-end data pipeline."""
@@ -38,9 +41,9 @@ def run_pipeline():
         force_present=False,
     )
 
-    #run_realtime_simulation_pipeline(
-    #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
-    #    events_path=events_path,
-    #    news_base_path=news_base_path,
-    #    storage_dir=Path("data") / "simulation",
-    #)
+    run_realtime_simulation_pipeline(
+        active_event_groups_path=Path("data") / "active_event_groups.jsonl",
+        events_path=events_path,
+        news_base_path=news_base_path,
+        storage_dir=Path("data") / "simulation",
+    )
