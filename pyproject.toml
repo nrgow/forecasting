@@ -31,4 +31,6 @@ dependencies = [
     "python-slugify>=8.0.4",
     "fastapi>=0.128.0",
     "wikipedia>=1.4.0",
+    "markdownify>=1.2.2",
+    "sqlitedict>=2.1.0",
 ]
