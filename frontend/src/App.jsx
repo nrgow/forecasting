@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -9,12 +9,40 @@ import {
 const EMPTY_LIST = [];
 const TOOLTIP_LENGTH = 40;
 const WRAPPED_COLUMNS = new Set(["event_group_id", "event_urls"]);
+const DETAIL_ROUTE = /^\/event-groups\/([^/]+)$/;
 
 export default function App() {
   const [rows, setRows] = useState(EMPTY_LIST);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
   const [sorting, setSorting] = useState([]);
+  const [activeOnly, setActiveOnly] = useState(false);
+  const [path, setPath] = useState(window.location.pathname);
+  const [detail, setDetail] = useState(null);
+  const [detailStatus, setDetailStatus] = useState("idle");
+  const [detailError, setDetailError] = useState("");
+
+  const route = useMemo(() => {
+    const match = path.match(DETAIL_ROUTE);
+    if (!match) {
+      return { type: "table" };
+    }
+    return { type: "detail", id: match[1] };
+  }, [path]);
+
+  const navigate = useCallback((nextPath) => {
+    if (window.location.pathname === nextPath) {
+      return;
+    }
+    window.history.pushState({}, "", nextPath);
+    setPath(nextPath);
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -47,7 +75,7 @@ export default function App() {
   }, []);
 
   const { columns, numericColumns } = useMemo(() => {
-    if (rows.length === 0) {
+    if (rows.length === 0 || route.type !== "table") {
       return { columns: [], numericColumns: new Set() };
     }
 
@@ -56,8 +84,19 @@ export default function App() {
       keys.filter((key) => rows.some((row) => typeof row[key] === "number"))
     );
     const focusKeys = ["event_names", "event_urls"];
-    const baseKeys = keys.filter((key) => !focusKeys.includes(key));
+    const baseKeys = keys.filter(
+      (key) => !focusKeys.includes(key) && key !== "active"
+    );
     const orderedKeys = [...baseKeys];
+
+    if (keys.includes("active")) {
+      const idIndex = orderedKeys.indexOf("event_group_id");
+      if (idIndex === -1) {
+        orderedKeys.unshift("active");
+      } else {
+        orderedKeys.splice(idIndex + 1, 0, "active");
+      }
+    }
 
     if (keys.includes("event_names")) {
       orderedKeys.splice(1, 0, "event_names");
@@ -76,10 +115,20 @@ export default function App() {
       })),
       numericColumns
     };
-  }, [rows]);
+  }, [rows, route.type]);
+
+  const visibleRows = useMemo(() => {
+    if (route.type !== "table") {
+      return EMPTY_LIST;
+    }
+    if (!activeOnly) {
+      return rows;
+    }
+    return rows.filter((row) => row.active);
+  }, [activeOnly, rows, route.type]);
 
   const table = useReactTable({
-    data: rows,
+    data: visibleRows,
     columns,
     state: {
       sorting
@@ -92,6 +141,30 @@ export default function App() {
   function formatCellValue(key, value) {
     if (value === null || value === undefined) {
       return "";
+    }
+
+    if (key === "event_group_id") {
+      const id = String(value);
+      return (
+        <a
+          className="event-group-link"
+          href={`/event-groups/${id}`}
+          onClick={(event) => {
+            event.preventDefault();
+            navigate(`/event-groups/${id}`);
+          }}
+        >
+          {id}
+        </a>
+      );
+    }
+
+    if (key === "active") {
+      return (
+        <span className={`status-badge ${value ? "is-active" : "is-inactive"}`}>
+          {value ? "Active" : "Inactive"}
+        </span>
+      );
     }
 
     if (key === "event_urls") {
@@ -141,6 +214,42 @@ export default function App() {
     return <span className="cell-clip">{text}</span>;
   }
 
+  useEffect(() => {
+    if (route.type !== "detail") {
+      return;
+    }
+    let alive = true;
+    setDetailStatus("loading");
+    setDetailError("");
+    setDetail(null);
+
+    fetch(`/event_groups/${route.id}`)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Request failed: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((data) => {
+        if (!alive) {
+          return;
+        }
+        setDetail(data);
+        setDetailStatus("ready");
+      })
+      .catch((fetchError) => {
+        if (!alive) {
+          return;
+        }
+        setDetailError(fetchError.message);
+        setDetailStatus("error");
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [route]);
+
   return (
     <div className="page">
       <header className="terminal-bar">
@@ -148,87 +257,285 @@ export default function App() {
           <div className="brand-badge">NT</div>
           <div>
             <p className="brand-title">NEWSTALK TERMINAL</p>
-            <p className="brand-subtitle">Event stats feed</p>
+            <p className="brand-subtitle">
+              {route.type === "detail"
+                ? "Event group profile"
+                : "Event stats feed"}
+            </p>
           </div>
         </div>
       </header>
 
-      <section className="panel">
-        {status === "loading" && (
-          <div className="state">Loading event stats table…</div>
-        )}
-        {status === "error" && (
-          <div className="state error">{error}</div>
-        )}
-        {status === "ready" && rows.length === 0 && (
-          <div className="state">No rows returned.</div>
-        )}
-        {status === "ready" && rows.length > 0 && (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                {table.getHeaderGroups().map((headerGroup) => (
-                  <tr key={headerGroup.id}>
-                    {headerGroup.headers.map((header) => (
-                      <th
-                        key={header.id}
-                        data-col={header.column.id}
-                        className={
-                          numericColumns.has(header.column.id)
-                            ? "numeric-col"
-                            : undefined
-                        }
-                      >
-                        {header.isPlaceholder ? null : (
-                          <button
-                            className="sort-button"
-                            type="button"
-                            onClick={header.column.getToggleSortingHandler()}
+      {route.type === "table" ? (
+        <section className="panel">
+          {status === "loading" && (
+            <div className="state">Loading event stats table…</div>
+          )}
+          {status === "error" && (
+            <div className="state error">{error}</div>
+          )}
+          {status === "ready" && rows.length === 0 && (
+            <div className="state">No rows returned.</div>
+          )}
+          {status === "ready" && rows.length > 0 && (
+            <>
+              <div className="table-controls">
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={activeOnly}
+                    onChange={(event) => setActiveOnly(event.target.checked)}
+                  />
+                  <span>Show active only</span>
+                </label>
+                <div className="table-meta">
+                  Showing {visibleRows.length} of {rows.length} groups
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    {table.getHeaderGroups().map((headerGroup) => (
+                      <tr key={headerGroup.id}>
+                        {headerGroup.headers.map((header) => (
+                          <th
+                            key={header.id}
+                            data-col={header.column.id}
+                            className={
+                              numericColumns.has(header.column.id)
+                                ? "numeric-col"
+                                : undefined
+                            }
+                          >
+                            {header.isPlaceholder ? null : (
+                              <button
+                                className="sort-button"
+                                type="button"
+                                onClick={header.column.getToggleSortingHandler()}
+                              >
+                                {flexRender(
+                                  header.column.columnDef.header,
+                                  header.getContext()
+                                )}
+                                <span className="sort-indicator">
+                                  {header.column.getIsSorted() === "asc"
+                                    ? "▲"
+                                    : header.column.getIsSorted() === "desc"
+                                      ? "▼"
+                                      : "↕"}
+                                </span>
+                              </button>
+                            )}
+                          </th>
+                        ))}
+                      </tr>
+                    ))}
+                  </thead>
+                  <tbody>
+                    {table.getRowModel().rows.map((row) => (
+                      <tr key={row.id}>
+                        {row.getVisibleCells().map((cell) => (
+                          <td
+                            key={cell.id}
+                            data-col={cell.column.id}
+                            className={
+                              numericColumns.has(cell.column.id)
+                                ? "numeric-col"
+                                : undefined
+                            }
                           >
                             {flexRender(
-                              header.column.columnDef.header,
-                              header.getContext()
+                              cell.column.columnDef.cell,
+                              cell.getContext()
                             )}
-                            <span className="sort-indicator">
-                              {header.column.getIsSorted() === "asc"
-                                ? "▲"
-                                : header.column.getIsSorted() === "desc"
-                                  ? "▼"
-                                  : "↕"}
-                            </span>
-                          </button>
-                        )}
-                      </th>
+                          </td>
+                        ))}
+                      </tr>
                     ))}
-                  </tr>
-                ))}
-              </thead>
-              <tbody>
-                {table.getRowModel().rows.map((row) => (
-                  <tr key={row.id}>
-                    {row.getVisibleCells().map((cell) => (
-                      <td
-                        key={cell.id}
-                        data-col={cell.column.id}
-                        className={
-                          numericColumns.has(cell.column.id)
-                            ? "numeric-col"
-                            : undefined
-                        }
-                      >
-                        {flexRender(
-                          cell.column.columnDef.cell,
-                          cell.getContext()
-                        )}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </section>
+      ) : (
+        <section className="panel">
+          <div className="detail-header">
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => navigate("/")}
+            >
+              Back to stats table
+            </button>
           </div>
-        )}
-      </section>
+          {detailStatus === "loading" && (
+            <div className="state">Loading event group…</div>
+          )}
+          {detailStatus === "error" && (
+            <div className="state error">{detailError}</div>
+          )}
+          {detailStatus === "ready" && detail && (
+            <div className="detail-body">
+              <div className="detail-title">
+                <div>
+                  <p className="detail-id">{detail.event_group_id}</p>
+                  <h2>{detail.event_group_title}</h2>
+                </div>
+                <span
+                  className={`status-badge ${
+                    detail.active ? "is-active" : "is-inactive"
+                  }`}
+                >
+                  {detail.active ? "Active" : "Inactive"}
+                </span>
+              </div>
+
+              <div className="detail-section">
+                <h3>Event group events</h3>
+                <div className="event-grid">
+                  {detail.events.map((event) => (
+                    <article key={event.id} className="event-card">
+                      <div className="event-header">
+                        <h4>{event.title}</h4>
+                        <a href={event.url} target="_blank" rel="noreferrer">
+                          {event.url}
+                        </a>
+                      </div>
+                      {event.description && (
+                        <p className="event-description">{event.description}</p>
+                      )}
+                      <div className="event-meta">
+                        <span>Start: {event.start_date || "—"}</span>
+                        <span>End: {event.end_date || "—"}</span>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              <div className="detail-section">
+                <h3>Open markets</h3>
+                {detail.open_markets.length === 0 ? (
+                  <div className="state">No open markets listed.</div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="compact-table">
+                      <thead>
+                        <tr>
+                          <th>Question</th>
+                          <th>End date</th>
+                          <th className="numeric-col">Liquidity</th>
+                          <th className="numeric-col">Volume</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.open_markets.map((market) => (
+                          <tr key={market.id}>
+                            <td>{market.question}</td>
+                            <td>{market.end_date || "—"}</td>
+                            <td className="numeric-col">
+                              {market.liquidity !== null
+                                ? market.liquidity.toFixed(2)
+                                : "—"}
+                            </td>
+                            <td className="numeric-col">
+                              {market.volume !== null
+                                ? market.volume.toFixed(2)
+                                : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="detail-section">
+                <h3>Relevant news</h3>
+                {detail.relevant_news.length === 0 ? (
+                  <div className="state">No relevant news captured yet.</div>
+                ) : (
+                  <div className="news-list">
+                    {detail.relevant_news.map((article) => (
+                      <article
+                        key={`${article.article_id}-${article.run_id}`}
+                        className="news-card"
+                      >
+                        <div>
+                          <a
+                            href={article.article_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {article.article_title}
+                          </a>
+                          <p>{article.article_url}</p>
+                        </div>
+                        <div className="news-meta">
+                          <span>{article.article_published_at}</span>
+                          <span>{article.model}</span>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="detail-section">
+                <h3>Timelines</h3>
+                {detail.present_timeline ? (
+                  <div className="timeline-card">
+                    <div className="timeline-header">
+                      <strong>Present timeline</strong>
+                      <span>{detail.present_timeline.generated_at}</span>
+                    </div>
+                    <pre className="timeline-text">
+                      {detail.present_timeline.summary}
+                    </pre>
+                    {detail.present_timeline.keyterms.length > 0 && (
+                      <div className="keyterm-list">
+                        {detail.present_timeline.keyterms.map((term, index) => (
+                          <span key={`${term}-${index}`}>{term}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="state">No present timeline stored.</div>
+                )}
+                {detail.future_timelines.length > 0 && (
+                  <div className="timeline-stack">
+                    {detail.future_timelines.map((timeline, index) => (
+                      <div
+                        key={`${timeline.generated_at}-${index}`}
+                        className="timeline-card"
+                      >
+                        <div className="timeline-header">
+                          <strong>Future timeline</strong>
+                          <span>{timeline.generated_at}</span>
+                        </div>
+                        <p className="timeline-scenario">
+                          {timeline.scenario}
+                        </p>
+                        {timeline.results.map((result, resultIndex) => (
+                          <pre
+                            key={`${timeline.generated_at}-${resultIndex}`}
+                            className="timeline-text"
+                          >
+                            {result}
+                          </pre>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }
