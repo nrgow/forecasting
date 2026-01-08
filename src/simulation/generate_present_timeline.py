@@ -24,27 +24,39 @@ class EventStore:
 
 
 class ExtractEvents(dspy.Signature):
+    """Extract dated events from a timeline draft within requested bounds."""
+
     topic_pertaining_to: str = dspy.InputField()
     content: str = dspy.InputField()
+    min_events: int = dspy.InputField()
+    max_events: int = dspy.InputField()
     events: list[Event] = dspy.OutputField()
 
 
 class EventsToTimeline(dspy.Signature):
+    """Convert structured events into a narrative timeline."""
+
     topic_pertaining_to: str = dspy.InputField()
     events: list[Event] = dspy.InputField()
     timeline: str = dspy.OutputField()
 
 
 class EventsTimeline(dspy.Signature):
+    """Draft a detailed present-day timeline for the topic."""
+
     topic_pertaining_to: str = dspy.InputField()
     time_until: str = dspy.InputField()
+    target_length_chars: int = dspy.InputField()
     timeline: str = dspy.OutputField()
 
 
 class SpecificEventsTimeline(dspy.Signature):
+    """Expand a specific subtopic into a detailed timeline."""
+
     topic_pertaining_to: str = dspy.InputField()
     subtopic_pertaining_to: str = dspy.InputField()
     date: str = dspy.InputField()
+    target_length_chars: int = dspy.InputField()
     timeline: str = dspy.OutputField()
 
 
@@ -56,8 +68,11 @@ class Subtimeline:
 
 
 class MergeTimelines(dspy.Signature):
+    """Merge multiple subtimelines into a cohesive chronology."""
+
     overall_topic_pertaining_to: str = dspy.InputField()
     subtimelines: list[Subtimeline] = dspy.InputField()
+    target_length_chars: int = dspy.InputField()
     merged_timeline: str = dspy.OutputField(
         desc="The merged timeline containing all the information in the subtimelines but arranged chronologically and narrative flow"
     )
@@ -67,11 +82,17 @@ def generate_present_timeline(
     topic_pertaining_to: str,
     time_until=str(dt.date.today()),
     model="openrouter/x-ai/grok-4.1-fast",
+    target_timeline_chars: int = 24000,
+    min_events: int = 18,
+    max_events: int = 28,
 ):
+    """Generate a present timeline with enough detail for long-context usage."""
     dspy.configure(lm=dspy.LM(model))
 
     wiki = tools.CachedWikipedia()
     #news_api = gdelt_api.GDELTDocAPI()
+    first_timeline_target_chars = max(6000, target_timeline_chars // 3)
+    subtimeline_target_chars = max(1200, target_timeline_chars // min_events)
 
     loop = dspy.ReAct(
         EventsTimeline,
@@ -85,13 +106,18 @@ def generate_present_timeline(
     )
 
     first_timeline = loop(
-        topic_pertaining_to=topic_pertaining_to, time_until=time_until
+        topic_pertaining_to=topic_pertaining_to,
+        time_until=time_until,
+        target_length_chars=first_timeline_target_chars,
     )
 
     timeline_extraction = dspy.Predict(ExtractEvents)
 
     extracted_events = timeline_extraction(
-        topic_pertaining_to=topic_pertaining_to, content=first_timeline.timeline
+        topic_pertaining_to=topic_pertaining_to,
+        content=first_timeline.timeline,
+        min_events=min_events,
+        max_events=max_events,
     )
 
     sub_loop = dspy.ReAct(
@@ -112,6 +138,7 @@ def generate_present_timeline(
             topic_pertaining_to=topic_pertaining_to,
             subtopic_pertaining_to=event.description,
             date=event.date,
+            target_length_chars=subtimeline_target_chars,
         )
         subtimelines.append(subtimeline)
 
@@ -126,12 +153,14 @@ def generate_present_timeline(
             )
             for event, st in zip(extracted_events.events, subtimelines)
         ],
+        target_length_chars=target_timeline_chars,
     )
     output = {
         "first_timeline": first_timeline.toDict(),
         "extracted_events": extracted_events.toDict(),
         "subtimelines": [st.toDict() for st in subtimelines],
         "merged": merged.toDict(),
+        "target_timeline_chars": target_timeline_chars,
     }
     output["extracted_events"]["events"] = [asdict(e) for e in output["extracted_events"]["events"]]
     return output

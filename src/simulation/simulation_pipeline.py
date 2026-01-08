@@ -102,7 +102,12 @@ class PresentTimelineService:
         self.storage = storage
 
     def generate_if_missing(
-        self, event_groups: list[EventGroup], force: bool
+        self,
+        event_groups: list[EventGroup],
+        force: bool,
+        target_timeline_chars: int | None,
+        min_events: int | None,
+        max_events: int | None,
     ) -> list[dict]:
         """Generate present timelines if missing or forced."""
         existing = self.storage.load_present_timeline_index()
@@ -119,7 +124,14 @@ class PresentTimelineService:
                 "Generating present timeline for event_group_id=%s",
                 event_group.id(),
             )
-            output = generate_present_timeline(event_group.template_title)
+            output = generate_present_timeline(
+                event_group.template_title,
+                target_timeline_chars=target_timeline_chars
+                if target_timeline_chars is not None
+                else 24000,
+                min_events=min_events if min_events is not None else 18,
+                max_events=max_events if max_events is not None else 28,
+            )
             extracted_events = output["extracted_events"]["events"]
             derived_keyterms = [event["description"] for event in extracted_events]
             record = {
@@ -312,6 +324,9 @@ def run_present_timeline_pipeline(
     events_path: Path,
     storage_dir: Path,
     force_present: bool = False,
+    target_timeline_chars: int | None = None,
+    min_events: int | None = None,
+    max_events: int | None = None,
 ) -> dict:
     """Run the present timeline generation pipeline."""
     storage = SimulationStorage(storage_dir)
@@ -323,7 +338,13 @@ def run_present_timeline_pipeline(
     event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
 
     present_service = PresentTimelineService(storage)
-    generated_present = present_service.generate_if_missing(event_groups, force_present)
+    generated_present = present_service.generate_if_missing(
+        event_groups,
+        force_present,
+        target_timeline_chars,
+        min_events,
+        max_events,
+    )
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
     run_record = {
@@ -404,6 +425,9 @@ def run_simulation_pipeline(
     news_base_path: Path,
     storage_dir: Path,
     force_present: bool = False,
+    target_timeline_chars: int | None = None,
+    min_events: int | None = None,
+    max_events: int | None = None,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     timeline_models: list[str] | None = None,
     timeline_temps: list[float] | None = None,
@@ -415,6 +439,9 @@ def run_simulation_pipeline(
         events_path=events_path,
         storage_dir=storage_dir,
         force_present=force_present,
+        target_timeline_chars=target_timeline_chars,
+        min_events=min_events,
+        max_events=max_events,
     )
     realtime = run_realtime_simulation_pipeline(
         active_event_groups_path=active_event_groups_path,
