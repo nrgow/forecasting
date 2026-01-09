@@ -1,4 +1,4 @@
-# Newstalk
+# World forecasting
 
 ## API
 
