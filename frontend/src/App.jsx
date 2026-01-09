@@ -10,6 +10,7 @@ const EMPTY_LIST = [];
 const TOOLTIP_LENGTH = 40;
 const WRAPPED_COLUMNS = new Set(["event_group_id", "event_urls"]);
 const DETAIL_ROUTE = /^\/event-groups\/([^/]+)$/;
+const OPPORTUNITIES_ROUTE = "/open-markets";
 
 export default function App() {
   const [rows, setRows] = useState(EMPTY_LIST);
@@ -21,10 +22,16 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   const [detailStatus, setDetailStatus] = useState("idle");
   const [detailError, setDetailError] = useState("");
+  const [opportunities, setOpportunities] = useState(EMPTY_LIST);
+  const [opportunityStatus, setOpportunityStatus] = useState("idle");
+  const [opportunityError, setOpportunityError] = useState("");
 
   const route = useMemo(() => {
     const match = path.match(DETAIL_ROUTE);
     if (!match) {
+      if (path === OPPORTUNITIES_ROUTE) {
+        return { type: "opportunities" };
+      }
       return { type: "table" };
     }
     return { type: "detail", id: match[1] };
@@ -67,6 +74,38 @@ export default function App() {
         }
         setError(fetchError.message);
         setStatus("error");
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    setOpportunityStatus("loading");
+    setOpportunityError("");
+
+    fetch("/open_market_opportunities")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Request failed: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((data) => {
+        if (!alive) {
+          return;
+        }
+        setOpportunities(data);
+        setOpportunityStatus("ready");
+      })
+      .catch((fetchError) => {
+        if (!alive) {
+          return;
+        }
+        setOpportunityError(fetchError.message);
+        setOpportunityStatus("error");
       });
 
     return () => {
@@ -267,9 +306,50 @@ export default function App() {
             <p className="brand-subtitle">
               {route.type === "detail"
                 ? "Event group profile"
-                : "Event stats feed"}
+                : route.type === "opportunities"
+                  ? "Open market opportunities"
+                  : "Event stats feed"}
             </p>
           </div>
+        </div>
+        <div className="terminal-status">
+          <button
+            className={`status-pill ${route.type === "table" ? "is-live" : ""}`}
+            type="button"
+            onClick={() => navigate("/")}
+          >
+            Event stats
+          </button>
+          <button
+            className={`status-pill ${
+              route.type === "opportunities" ? "is-live" : ""
+            }`}
+            type="button"
+            onClick={() => navigate(OPPORTUNITIES_ROUTE)}
+          >
+            Opportunities
+          </button>
+        </div>
+        <div className="terminal-ticker">
+          {route.type === "opportunities" ? (
+            <span>
+              {opportunityStatus === "ready"
+                ? `${opportunities.length} opportunities`
+                : opportunityStatus === "loading"
+                  ? "Loading opportunities"
+                  : "Opportunity feed error"}
+            </span>
+          ) : route.type === "table" ? (
+            <span>
+              {status === "ready"
+                ? `${rows.length} event groups`
+                : status === "loading"
+                  ? "Loading event stats"
+                  : "Event stats error"}
+            </span>
+          ) : (
+            <span>Event group detail</span>
+          )}
         </div>
       </header>
 
@@ -363,6 +443,82 @@ export default function App() {
                 </table>
               </div>
             </>
+          )}
+        </section>
+      ) : route.type === "opportunities" ? (
+        <section className="panel">
+          {opportunityStatus === "loading" && (
+            <div className="state">Loading open market opportunities…</div>
+          )}
+          {opportunityStatus === "error" && (
+            <div className="state error">{opportunityError}</div>
+          )}
+          {opportunityStatus === "ready" && opportunities.length === 0 && (
+            <div className="state">No open market opportunities yet.</div>
+          )}
+          {opportunityStatus === "ready" && opportunities.length > 0 && (
+            <div className="table-wrap">
+              <table className="compact-table">
+                <thead>
+                  <tr>
+                    <th>Event group</th>
+                    <th>Open market</th>
+                    <th className="numeric-col">Market probability</th>
+                    <th className="numeric-col">Model probability</th>
+                    <th className="numeric-col">Simulations</th>
+                    <th className="numeric-col">Deviation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {opportunities.map((opportunity) => (
+                    <tr key={opportunity.market_id}>
+                      <td>
+                        <a
+                          className="event-group-link"
+                          href={`/event-groups/${opportunity.event_group_id}`}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            navigate(`/event-groups/${opportunity.event_group_id}`);
+                          }}
+                        >
+                          {opportunity.event_group_id}
+                        </a>
+                      </td>
+                      <td>
+                        <div className="opportunity-question">
+                          <strong>{opportunity.market_question}</strong>
+                          {opportunity.market_slug && (
+                            <a
+                              href={`https://polymarket.com/market/${opportunity.market_slug}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {opportunity.market_slug}
+                            </a>
+                          )}
+                        </div>
+                      </td>
+                      <td className="numeric-col">
+                        {formatProbability(opportunity.market_probability)}
+                      </td>
+                      <td className="numeric-col">
+                        <span className="probability-badge">
+                          {formatProbability(
+                            opportunity.estimated_probability
+                          )}
+                        </span>
+                      </td>
+                      <td className="numeric-col">{opportunity.samples}</td>
+                      <td className="numeric-col">
+                        <span className="delta-badge">
+                          {formatProbability(opportunity.probability_delta)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
       ) : (

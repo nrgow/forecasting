@@ -117,6 +117,7 @@ body {
   text-transform: uppercase;
   color: var(--terminal-accent-strong);
   background: rgba(12, 16, 19, 0.9);
+  cursor: pointer;
 }
 
 .status-pill.is-live {
@@ -132,6 +133,15 @@ body {
 .status-pill.is-error {
   border-color: rgba(255, 107, 87, 0.7);
   color: var(--terminal-negative);
+}
+
+.status-pill:hover {
+  border-color: var(--terminal-accent-strong);
+}
+
+.status-pill:focus-visible {
+  outline: 2px solid var(--terminal-accent-strong);
+  outline-offset: 3px;
 }
 
 .terminal-ticker {
@@ -569,6 +579,36 @@ td[data-col="event_urls"] {
   font-size: 11px;
   color: var(--terminal-positive);
   background: rgba(111, 227, 95, 0.08);
+}
+
+.opportunity-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.opportunity-question a {
+  color: var(--terminal-accent);
+  font-size: 12px;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.opportunity-question a:hover {
+  text-decoration: underline;
+}
+
+.delta-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 72px;
+  padding: 4px 8px;
+  border: 1px solid rgba(244, 178, 35, 0.5);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--terminal-accent-strong);
+  background: rgba(244, 178, 35, 0.12);
 }
 
 .news-list {

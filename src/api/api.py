@@ -79,6 +79,49 @@ def index_latest_market_probabilities(records: list[dict]) -> dict[str, list[dic
     }
 
 
+def build_open_market_opportunities(
+    event_group_index: dict[str, EventGroup],
+    market_probabilities: dict[str, list[dict]],
+) -> list[dict]:
+    """Build open market opportunities with market and model probabilities."""
+    opportunities: list[dict] = []
+    for event_group_id, records in market_probabilities.items():
+        event_group = event_group_index[event_group_id]
+        market_lookup = {
+            market.id: market
+            for market in event_group.open_markets()
+            if market.active and not market.closed
+        }
+        for record in records:
+            market = market_lookup[record["market_id"]]
+            market_probability = market.yes_probability()
+            estimated_probability = record["probability"]
+            delta = (
+                abs(estimated_probability - market_probability)
+                if market_probability is not None
+                else None
+            )
+            opportunities.append(
+                {
+                    "event_group_id": event_group_id,
+                    "market_id": record["market_id"],
+                    "market_question": market.question,
+                    "market_slug": record["market_slug"],
+                    "market_probability": market_probability,
+                    "estimated_probability": estimated_probability,
+                    "probability_delta": delta,
+                    "samples": record["samples"],
+                }
+            )
+    return sorted(
+        opportunities,
+        key=lambda item: item["probability_delta"]
+        if item["probability_delta"] is not None
+        else -1,
+        reverse=True,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the events stats table once at startup."""
@@ -99,6 +142,10 @@ async def lifespan(app: FastAPI):
     )
     app.state.market_probabilities = index_latest_market_probabilities(
         load_jsonl_records(simulation_dir / "estimated_event_probabilities.jsonl")
+    )
+    app.state.open_market_opportunities = build_open_market_opportunities(
+        app.state.event_group_index,
+        app.state.market_probabilities,
     )
     yield
 
@@ -182,3 +229,9 @@ def event_group_detail(event_group_id: str) -> dict:
         "present_timeline": present_timeline,
         "future_timelines": future_timelines,
     }
+
+
+@app.get("/open_market_opportunities")
+def open_market_opportunities() -> list[dict]:
+    """Return open market opportunities with modeled probabilities."""
+    return app.state.open_market_opportunities
