@@ -12,7 +12,7 @@ import dspy
 import more_itertools as mit
 
 from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
-from .generate_future_timeline import run_model
+from .generate_future_timeline import run_model, sanitize_future_timeline_topic
 from .generate_present_timeline import generate_present_timeline
 from .news_relevance_dspy import SelectRelevantArticles
 from .storage import SimulationStorage
@@ -313,7 +313,7 @@ class FutureTimelineService:
                 event_group_id,
                 len(relevant_records),
             )
-            scenario = build_future_timeline_prompt(event_group)
+            scenario = build_future_timeline_prompt(event_group, self.estimator.models[0])
             contexts = list(
                 islice((prompt_text_from_record(record) for record in relevant_records), 50)
             )
@@ -396,9 +396,18 @@ def prompt_text_from_record(record: dict) -> str:
     return f"{record['article_title']}\n\n{record['article_desc']}".strip()
 
 
-def build_future_timeline_prompt(event_group: EventGroup) -> str:
+def build_sanitized_future_topic(event_group: EventGroup, model: str) -> str:
+    """Return a sanitized topic sentence for future timeline prompts."""
+    descriptions = [event.description for event in event_group.events if event.description]
+    unique_descriptions = list(mit.unique_everseen(descriptions))
+    return sanitize_future_timeline_topic(
+        event_group.template_title, unique_descriptions, model
+    )
+
+
+def build_future_timeline_prompt(event_group: EventGroup, model: str) -> str:
     """Build a prompt for future timeline generation bounded by market end dates."""
-    base_prompt = build_event_group_prompt(event_group)
+    base_prompt = build_sanitized_future_topic(event_group, model)
     latest_end_date = event_group.latest_open_market_end_date()
     if latest_end_date is None:
         return base_prompt

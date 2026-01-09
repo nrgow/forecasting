@@ -20,7 +20,7 @@
 
 ## Future Timeline Simulation (probability estimation)
 
-- Prompt assembly: `build_future_timeline_prompt` in `src/simulation/simulation_pipeline.py` frames the future timeline question and bounds it by the market end date.
+- Prompt assembly: `build_future_timeline_prompt` in `src/simulation/simulation_pipeline.py` uses a DSPy sanitizer to convert the event title/descriptions into a one-sentence topic, then bounds it by the market end date.
 - Entry point: `FutureTimelineService.process` in `src/simulation/simulation_pipeline.py`.
 - `FutureTimelineEstimator.generate` runs multiple models and temperatures, delegating to `run_model` in `src/simulation/generate_future_timeline.py`.
 - For each model/temperature rollout:

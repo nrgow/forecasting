@@ -25,6 +25,29 @@ class TimelineImplication(dspy.Signature):
     )
 
 
+class SanitizeFutureTimelineTopic(dspy.Signature):
+    """Summarize event details into a one-sentence general topic without market framing."""
+
+    event_title: str = dspy.InputField()
+    event_descriptions: list[str] = dspy.InputField()
+    sanitized_topic: str = dspy.OutputField(
+        desc="One sentence topic, without market framing or resolution criteria"
+    )
+
+
+def sanitize_future_timeline_topic(
+    event_title: str, event_descriptions: list[str], model: str
+) -> str:
+    """Generate a sanitized one-sentence topic for future timeline prompts."""
+    dspy.configure(lm=dspy.LM(model))
+    predictor = dspy.Predict(SanitizeFutureTimelineTopic)
+    result = predictor(
+        event_title=event_title,
+        event_descriptions=event_descriptions,
+    )
+    return result.sanitized_topic.strip()
+
+
 def run_model(
     model,
     scenario,
