@@ -55,46 +55,50 @@ def run_model(
     current_date,
     market_specs,
     temps=[0.1, 0.3, 0.5, 0.7, 0.9],
+    rollouts_per_temp: int = 1,
 ):
     dspy.configure(lm=dspy.LM(model))
     rval = []
-    for rollout_id, temp in enumerate(temps):
-        timeline_prediction = dspy.Predict(
-            FutureTimeline, rollout_id=rollout_id, temperature=temp
-        )
-        question_answering = dspy.ChainOfThought(TimelineImplication, temperature=0)
-
-        timeline = timeline_prediction(
-            timeline_scenario=scenario,
-            contexts=contexts,
-            current_date=current_date,
-        )
-        market_implications = []
-        for market in market_specs:
-            timeline_implication = question_answering(
-                timeline=timeline.simulated_timeline,
-                question_to_answer=market["market_question"],
-                implication_date=market["implication_date"],
+    rollout_id = 0
+    for temp in temps:
+        for _ in range(rollouts_per_temp):
+            timeline_prediction = dspy.Predict(
+                FutureTimeline, rollout_id=rollout_id, temperature=temp
             )
-            market_implications.append(
+            question_answering = dspy.ChainOfThought(TimelineImplication, temperature=0)
+
+            timeline = timeline_prediction(
+                timeline_scenario=scenario,
+                contexts=contexts,
+                current_date=current_date,
+            )
+            market_implications = []
+            for market in market_specs:
+                timeline_implication = question_answering(
+                    timeline=timeline.simulated_timeline,
+                    question_to_answer=market["market_question"],
+                    implication_date=market["implication_date"],
+                )
+                market_implications.append(
+                    {
+                        "market_id": market["market_id"],
+                        "market_question": market["market_question"],
+                        "market_slug": market["market_slug"],
+                        "market_end_date": market["market_end_date"],
+                        "implication_date": market["implication_date"],
+                        "implied_answer": timeline_implication.implied_answer,
+                    }
+                )
+            rval.append(
                 {
-                    "market_id": market["market_id"],
-                    "market_question": market["market_question"],
-                    "market_slug": market["market_slug"],
-                    "market_end_date": market["market_end_date"],
-                    "implication_date": market["implication_date"],
-                    "implied_answer": timeline_implication.implied_answer,
+                    "model": model,
+                    "rollout_id": rollout_id,
+                    "temp": temp,
+                    "simulated_timeline": timeline.simulated_timeline,
+                    "market_implications": market_implications,
                 }
             )
-        rval.append(
-            {
-                "model": model,
-                "rollout_id": rollout_id,
-                "temp": temp,
-                "simulated_timeline": timeline.simulated_timeline,
-                "market_implications": market_implications,
-            }
-        )
+            rollout_id += 1
 
     return rval
 
@@ -104,6 +108,7 @@ def generate_future_timeline(
     wiki_context_pages: list[str],
     current_date: str,
     market_specs: list[dict],
+    rollouts_per_temp: int = 1,
 ):
     contexts = []
     for page_title in wiki_context_pages:
@@ -124,6 +129,7 @@ def generate_future_timeline(
         contexts=contexts,
         current_date=current_date,
         market_specs=market_specs,
+        rollouts_per_temp=rollouts_per_temp,
     )
 
     results = []

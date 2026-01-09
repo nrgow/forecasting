@@ -55,10 +55,16 @@ class NewsRelevanceJudge:
 class FutureTimelineEstimator:
     """Generate future timelines and implied probability estimates."""
 
-    def __init__(self, models: list[str], temps: list[float]) -> None:
-        """Initialize the estimator with model and temperature settings."""
+    def __init__(
+        self,
+        models: list[str],
+        temps: list[float],
+        rollouts_per_temp: int,
+    ) -> None:
+        """Initialize the estimator with model, temperature, and rollout settings."""
         self.models = models
         self.temps = temps
+        self.rollouts_per_temp = rollouts_per_temp
 
     def generate(
         self,
@@ -77,6 +83,7 @@ class FutureTimelineEstimator:
                     current_date=current_date,
                     market_specs=market_specs,
                     temps=self.temps,
+                    rollouts_per_temp=self.rollouts_per_temp,
                 )
                 for model in self.models
             )
@@ -254,10 +261,15 @@ class FutureTimelineService:
         storage: SimulationStorage,
         timeline_models: list[str],
         timeline_temps: list[float],
+        timeline_rollouts: int,
     ) -> None:
-        """Initialize the service with timeline models and temperatures."""
+        """Initialize the service with timeline models, temperatures, and rollouts."""
         self.storage = storage
-        self.estimator = FutureTimelineEstimator(timeline_models, timeline_temps)
+        self.estimator = FutureTimelineEstimator(
+            timeline_models,
+            timeline_temps,
+            timeline_rollouts,
+        )
 
     def process(
         self,
@@ -339,6 +351,7 @@ class FutureTimelineService:
                 "contexts_count": len(contexts),
                 "models": self.estimator.models,
                 "temps": self.estimator.temps,
+                "rollouts_per_temp": self.estimator.rollouts_per_temp,
                 "results": timeline_output["results"],
                 "market_probabilities": timeline_output["market_probabilities"],
                 "relevance_run_id": relevance_run_id,
@@ -650,6 +663,7 @@ def run_future_timeline_pipeline(
     relevance_run_id: str | None = None,
     timeline_models: list[str] | None = ["openrouter/x-ai/grok-4.1-fast"],
     timeline_temps: list[float] | None = [0.7],
+    timeline_rollouts: int | None = 10,
     force_without_relevance: bool = False,
 ) -> dict:
     """Run the future timeline pipeline for active event groups."""
@@ -670,6 +684,8 @@ def run_future_timeline_pipeline(
         ]
     if timeline_temps is None:
         timeline_temps = [0.1, 0.3, 0.5, 0.7, 0.9]
+    if timeline_rollouts is None:
+        timeline_rollouts = 10
 
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
@@ -680,6 +696,7 @@ def run_future_timeline_pipeline(
         storage=storage,
         timeline_models=timeline_models,
         timeline_temps=timeline_temps,
+        timeline_rollouts=timeline_rollouts,
     )
     summaries = future_service.process(
         event_groups,
@@ -697,6 +714,7 @@ def run_future_timeline_pipeline(
         "event_group_summaries": summaries,
         "timeline_models": timeline_models,
         "timeline_temps": timeline_temps,
+        "timeline_rollouts": timeline_rollouts,
     }
     storage.append_run_metadata(run_record)
     logging.info("Future timeline run %s completed", run_id)
@@ -715,6 +733,7 @@ def run_simulation_pipeline(
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     timeline_models: list[str] | None = None,
     timeline_temps: list[float] | None = None,
+    timeline_rollouts: int | None = None,
     batch_size: int = 25,
 ) -> dict:
     """Run present timeline, relevance, and future timeline pipelines."""
@@ -743,5 +762,6 @@ def run_simulation_pipeline(
         relevance_run_id=relevance["run_id"],
         timeline_models=timeline_models,
         timeline_temps=timeline_temps,
+        timeline_rollouts=timeline_rollouts,
     )
     return {"present": present, "relevance": relevance, "future": future}
