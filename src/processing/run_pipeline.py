@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from .pipeline import (
     fetch_polymarkets_events,
@@ -15,9 +16,10 @@ from ..simulation.simulation_pipeline import (
 
 def run_pipeline():
     """Run the end-to-end data pipeline."""
+    logging.info("Starting run_pipeline")
     news_base_path = Path("/mnt/ssd") / "newstalk-data" / "gdelt-gal"
     news_base_path.mkdir(parents=True, exist_ok=True)
-    #download_news_past_week(news_base_path)
+    #download_news_past_day(news_base_path)
 
     events_path = Path("data") / "events.jsonl"
     #fetch_polymarkets_events(events_path)
@@ -34,23 +36,29 @@ def run_pipeline():
     #    events_path
     #)
 
-    run_present_timeline_pipeline(
-        active_event_groups_path=Path("data") / "active_event_groups.jsonl",
-        events_path=events_path,
-        storage_dir=Path("data") / "simulation",
-        force_present=False,
-    )
+    #run_present_timeline_pipeline(
+    #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
+    #    events_path=events_path,
+    #    storage_dir=Path("data") / "simulation",
+    #    force_present=False,
+    #)
 
+    logging.info(
+        "Running relevance pipeline with events_path=%s news_base_path=%s storage_dir=%s",
+        events_path,
+        news_base_path,
+        Path("data") / "simulation",
+    )
     relevance_run = run_relevance_pipeline(
         active_event_groups_path=Path("data") / "active_event_groups.jsonl",
         events_path=events_path,
         news_base_path=news_base_path,
         storage_dir=Path("data") / "simulation",
     )
-
-    run_future_timeline_pipeline(
-        active_event_groups_path=Path("data") / "active_event_groups.jsonl",
-        events_path=events_path,
-        storage_dir=Path("data") / "simulation",
-        relevance_run_id=relevance_run["run_id"],
-    )
+    logging.info("Relevance pipeline completed run_id=%s", relevance_run["run_id"])
+    #run_future_timeline_pipeline(
+    #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
+    #    events_path=events_path,
+    #    storage_dir=Path("data") / "simulation",
+    #    relevance_run_id=relevance_run["run_id"],
+    #)

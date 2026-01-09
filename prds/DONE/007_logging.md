@@ -1,0 +1,1 @@
+Add logging to run_pipeline and the various sub pipelines, to help me understand what computation is currently running. E.g. for the news relevance judgment, be quite verbose about how many are being processed, e.g. one log line per batch.

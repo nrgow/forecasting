@@ -172,6 +172,12 @@ class RelevanceJudgmentService:
         run_id: str,
     ) -> list[dict]:
         """Judge relevance and store results."""
+        logging.info(
+            "Relevance judgment starting event_groups=%s articles=%s batch_size=%s",
+            len(event_groups),
+            len(articles),
+            self.batch_size,
+        )
         existing = self.storage.load_relevance_index()
         summaries = []
         for event_group in event_groups:
@@ -182,15 +188,29 @@ class RelevanceJudgmentService:
                 if (event_group_id, article.article_id) not in existing
             ]
             if not candidates:
+                logging.info(
+                    "Relevance skipping event_group_id=%s; no candidates",
+                    event_group_id,
+                )
                 continue
+            total_batches = (len(candidates) + self.batch_size - 1) // self.batch_size
+            logging.info(
+                "Relevance judging event_group_id=%s candidates=%s batches=%s",
+                event_group_id,
+                len(candidates),
+                total_batches,
+            )
             relevant_articles = 0
             query = build_event_group_prompt(event_group)
-            for batch in mit.chunked(candidates, self.batch_size):
+            for batch_index, batch in enumerate(
+                mit.chunked(candidates, self.batch_size), start=1
+            ):
                 batch_list = list(batch)
                 batch_texts = [article.prompt_text() for article in batch_list]
                 relevant_texts = set(
                     self.judge.select_relevant(query, batch_texts)
                 )
+                relevant_in_batch = 0
                 for article in batch_list:
                     relevant = article.prompt_text() in relevant_texts
                     record = {
@@ -207,7 +227,16 @@ class RelevanceJudgmentService:
                     }
                     self.storage.append_relevance_judgment(record)
                     if relevant:
+                        relevant_in_batch += 1
                         relevant_articles += 1
+                logging.info(
+                    "Relevance batch event_group_id=%s batch=%s/%s batch_size=%s relevant=%s",
+                    event_group_id,
+                    batch_index,
+                    total_batches,
+                    len(batch_list),
+                    relevant_in_batch,
+                )
             summaries.append(
                 {
                     "event_group_id": event_group_id,
@@ -247,11 +276,24 @@ class FutureTimelineService:
         for event_group in event_groups:
             event_group_id = event_group.id()
             if event_group_id not in grouped_records:
+                logging.info(
+                    "Future timeline skipping event_group_id=%s; no relevance records",
+                    event_group_id,
+                )
                 continue
             records = grouped_records[event_group_id]
             relevant_records = [record for record in records if record["relevant"]]
             if not relevant_records:
+                logging.info(
+                    "Future timeline skipping event_group_id=%s; no relevant records",
+                    event_group_id,
+                )
                 continue
+            logging.info(
+                "Future timeline generating event_group_id=%s relevant_records=%s",
+                event_group_id,
+                len(relevant_records),
+            )
             scenario = build_future_timeline_prompt(event_group)
             contexts = list(
                 islice((prompt_text_from_record(record) for record in relevant_records), 50)
@@ -393,10 +435,12 @@ def run_present_timeline_pipeline(
     storage = SimulationStorage(storage_dir)
     run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
+    logging.info("Present timeline run %s starting", run_id)
 
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
     event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
+    logging.info("Present timeline event_groups=%s", len(event_groups))
 
     present_service = PresentTimelineService(storage)
     generated_present = present_service.generate_if_missing(
@@ -430,6 +474,7 @@ def run_realtime_simulation_pipeline(
     batch_size: int = 25,
 ) -> dict:
     """Run the real-time simulation pipeline for active event groups."""
+    logging.info("Real-time simulation pipeline starting")
     relevance = run_relevance_pipeline(
         active_event_groups_path=active_event_groups_path,
         events_path=events_path,
@@ -461,18 +506,29 @@ def run_relevance_pipeline(
     storage = SimulationStorage(storage_dir)
     run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
+    logging.info("Relevance run %s starting", run_id)
     last_judged_at = storage.last_relevance_judged_at()
+    cutoff = run_started_at - dt.timedelta(hours=24)
     if last_judged_at is None:
-        news_since = run_started_at - dt.timedelta(hours=24)
+        news_since = cutoff
     else:
-        news_since = dt.datetime.fromisoformat(last_judged_at)
+        last_judged_time = dt.datetime.fromisoformat(last_judged_at)
+        news_since = max(last_judged_time, cutoff)
+    logging.info("Relevance news_since=%s", news_since.isoformat())
 
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
     event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
+    logging.info("Relevance event_groups=%s", len(event_groups))
 
     news_paths = iter_news_paths(news_base_path, news_since)
     articles = list(iter_news_articles(news_paths, news_since))
+    logging.info(
+        "Relevance articles=%s news_paths=%s batch_size=%s",
+        len(articles),
+        len(news_paths),
+        batch_size,
+    )
 
     relevance_service = RelevanceJudgmentService(
         storage=storage,
@@ -509,10 +565,12 @@ def run_future_timeline_pipeline(
     storage = SimulationStorage(storage_dir)
     run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
+    logging.info("Future timeline run %s starting", run_id)
     if relevance_run_id is None:
         relevance_run_id = storage.last_relevance_run_id()
     if relevance_run_id is None:
         raise ValueError("No relevance run id available for future timeline generation.")
+    logging.info("Future timeline relevance_run_id=%s", relevance_run_id)
 
     if timeline_models is None:
         timeline_models = [
@@ -525,6 +583,7 @@ def run_future_timeline_pipeline(
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
     event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
+    logging.info("Future timeline event_groups=%s", len(event_groups))
 
     future_service = FutureTimelineService(
         storage=storage,
@@ -563,6 +622,7 @@ def run_simulation_pipeline(
     batch_size: int = 25,
 ) -> dict:
     """Run present timeline, relevance, and future timeline pipelines."""
+    logging.info("Simulation pipeline starting")
     present = run_present_timeline_pipeline(
         active_event_groups_path=active_event_groups_path,
         events_path=events_path,

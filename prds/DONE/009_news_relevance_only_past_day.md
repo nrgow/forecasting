@@ -1,0 +1,1 @@
+Um for the news relevant judgment, can we m uh I want it to be that only the news of the past day or twenty-four hours is taken into consideration um and actually passed to the LLM for relevance judgment.
