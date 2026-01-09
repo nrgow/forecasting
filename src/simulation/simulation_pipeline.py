@@ -151,21 +151,18 @@ class PresentTimelineService:
         return generated
 
 
-class RealtimeEstimationService:
-    """Evaluate new articles and produce future timelines."""
+class RelevanceJudgmentService:
+    """Evaluate new articles for relevance against event groups."""
 
     def __init__(
         self,
         storage: SimulationStorage,
         relevance_model: str,
-        timeline_models: list[str],
-        timeline_temps: list[float],
         batch_size: int,
     ) -> None:
-        """Initialize the service with models and batch sizing."""
+        """Initialize the service with relevance model and batch sizing."""
         self.storage = storage
         self.judge = NewsRelevanceJudge(relevance_model)
-        self.estimator = FutureTimelineEstimator(timeline_models, timeline_temps)
         self.batch_size = batch_size
 
     def process(
@@ -174,7 +171,7 @@ class RealtimeEstimationService:
         articles: list[NewsArticle],
         run_id: str,
     ) -> list[dict]:
-        """Judge relevance, store results, and generate future timelines."""
+        """Judge relevance and store results."""
         existing = self.storage.load_relevance_index()
         summaries = []
         for event_group in event_groups:
@@ -186,7 +183,7 @@ class RealtimeEstimationService:
             ]
             if not candidates:
                 continue
-            relevant_articles = []
+            relevant_articles = 0
             query = build_event_group_prompt(event_group)
             for batch in mit.chunked(candidates, self.batch_size):
                 batch_list = list(batch)
@@ -201,6 +198,7 @@ class RealtimeEstimationService:
                         "article_id": article.article_id,
                         "article_url": article.url,
                         "article_title": article.title,
+                        "article_desc": article.desc,
                         "article_published_at": article.published_at.isoformat(),
                         "relevant": relevant,
                         "judged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -209,11 +207,55 @@ class RealtimeEstimationService:
                     }
                     self.storage.append_relevance_judgment(record)
                     if relevant:
-                        relevant_articles.append(article)
-            if not relevant_articles:
+                        relevant_articles += 1
+            summaries.append(
+                {
+                    "event_group_id": event_group_id,
+                    "articles_considered": len(candidates),
+                    "relevant_articles": relevant_articles,
+                }
+            )
+        return summaries
+
+
+class FutureTimelineService:
+    """Generate future timelines from relevance judgments."""
+
+    def __init__(
+        self,
+        storage: SimulationStorage,
+        timeline_models: list[str],
+        timeline_temps: list[float],
+    ) -> None:
+        """Initialize the service with timeline models and temperatures."""
+        self.storage = storage
+        self.estimator = FutureTimelineEstimator(timeline_models, timeline_temps)
+
+    def process(
+        self,
+        event_groups: list[EventGroup],
+        relevance_run_id: str,
+        run_id: str,
+    ) -> list[dict]:
+        """Generate future timelines for event groups with relevant articles."""
+        relevance_records = self.storage.load_relevance_records(relevance_run_id)
+        grouped_records: dict[str, list[dict]] = {}
+        for record in relevance_records:
+            grouped_records.setdefault(record["event_group_id"], []).append(record)
+
+        summaries = []
+        for event_group in event_groups:
+            event_group_id = event_group.id()
+            if event_group_id not in grouped_records:
+                continue
+            records = grouped_records[event_group_id]
+            relevant_records = [record for record in records if record["relevant"]]
+            if not relevant_records:
                 continue
             scenario = build_future_timeline_prompt(event_group)
-            contexts = list(islice((a.prompt_text() for a in relevant_articles), 50))
+            contexts = list(
+                islice((prompt_text_from_record(record) for record in relevant_records), 50)
+            )
             timeline_output = self.estimator.generate(
                 scenario=scenario,
                 contexts=contexts,
@@ -230,6 +272,8 @@ class RealtimeEstimationService:
                 "models": self.estimator.models,
                 "temps": self.estimator.temps,
                 "results": timeline_output["results"],
+                "relevance_run_id": relevance_run_id,
+                "run_id": run_id,
             }
             probability_record = {
                 "event_group_id": event_group_id,
@@ -237,6 +281,7 @@ class RealtimeEstimationService:
                 "generated_at": generated_at,
                 "probability": timeline_output["probability"],
                 "samples": len(timeline_output["results"]),
+                "relevance_run_id": relevance_run_id,
                 "run_id": run_id,
             }
             self.storage.append_future_timeline(timeline_record)
@@ -244,7 +289,8 @@ class RealtimeEstimationService:
             summaries.append(
                 {
                     "event_group_id": event_group_id,
-                    "relevant_articles": len(relevant_articles),
+                    "relevant_articles": len(relevant_records),
+                    "contexts_used": len(contexts),
                 }
             )
         return summaries
@@ -268,6 +314,11 @@ def build_event_group_prompt(event_group: EventGroup) -> str:
     unique_descriptions = list(mit.unique_everseen(descriptions))
     description_text = "\n\n".join(unique_descriptions)
     return f"{event_group.template_title}\n\n{description_text}".strip()
+
+
+def prompt_text_from_record(record: dict) -> str:
+    """Return prompt text for a relevance record."""
+    return f"{record['article_title']}\n\n{record['article_desc']}".strip()
 
 
 def build_future_timeline_prompt(event_group: EventGroup) -> str:
@@ -379,14 +430,90 @@ def run_realtime_simulation_pipeline(
     batch_size: int = 25,
 ) -> dict:
     """Run the real-time simulation pipeline for active event groups."""
+    relevance = run_relevance_pipeline(
+        active_event_groups_path=active_event_groups_path,
+        events_path=events_path,
+        news_base_path=news_base_path,
+        storage_dir=storage_dir,
+        relevance_model=relevance_model,
+        batch_size=batch_size,
+    )
+    future = run_future_timeline_pipeline(
+        active_event_groups_path=active_event_groups_path,
+        events_path=events_path,
+        storage_dir=storage_dir,
+        relevance_run_id=relevance["run_id"],
+        timeline_models=timeline_models,
+        timeline_temps=timeline_temps,
+    )
+    return {"relevance": relevance, "future": future}
+
+
+def run_relevance_pipeline(
+    active_event_groups_path: Path,
+    events_path: Path,
+    news_base_path: Path,
+    storage_dir: Path,
+    relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
+    batch_size: int = 25,
+) -> dict:
+    """Run the relevance judgment pipeline for active event groups."""
     storage = SimulationStorage(storage_dir)
     run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
-    last_run = storage.last_run_metadata()
-    if last_run is None:
+    last_judged_at = storage.last_relevance_judged_at()
+    if last_judged_at is None:
         news_since = run_started_at - dt.timedelta(hours=24)
     else:
-        news_since = dt.datetime.fromisoformat(last_run["news_until"])
+        news_since = dt.datetime.fromisoformat(last_judged_at)
+
+    active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
+    event_group_index = load_event_group_index(events_path)
+    event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
+
+    news_paths = iter_news_paths(news_base_path, news_since)
+    articles = list(iter_news_articles(news_paths, news_since))
+
+    relevance_service = RelevanceJudgmentService(
+        storage=storage,
+        relevance_model=relevance_model,
+        batch_size=batch_size,
+    )
+    summaries = relevance_service.process(event_groups, articles, run_id)
+
+    run_finished_at = dt.datetime.now(dt.timezone.utc)
+    run_record = {
+        "run_id": run_id,
+        "started_at": run_started_at.isoformat(),
+        "ended_at": run_finished_at.isoformat(),
+        "news_since": news_since.isoformat(),
+        "news_until": run_finished_at.isoformat(),
+        "articles_considered": len(articles),
+        "event_group_summaries": summaries,
+        "relevance_model": relevance_model,
+    }
+    storage.append_run_metadata(run_record)
+    logging.info("Relevance run %s completed", run_id)
+    return run_record
+
+
+def run_future_timeline_pipeline(
+    active_event_groups_path: Path,
+    events_path: Path,
+    storage_dir: Path,
+    relevance_run_id: str | None = None,
+    timeline_models: list[str] | None = ["openrouter/x-ai/grok-4.1-fast"],
+    timeline_temps: list[float] | None = [0.7],
+) -> dict:
+    """Run the future timeline pipeline for active event groups."""
+    storage = SimulationStorage(storage_dir)
+    run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
+    run_started_at = dt.datetime.now(dt.timezone.utc)
+    if relevance_run_id is None:
+        relevance_run_id = storage.last_relevance_run_id()
+    if relevance_run_id is None:
+        raise ValueError("No relevance run id available for future timeline generation.")
+
     if timeline_models is None:
         timeline_models = [
             "openrouter/anthropic/claude-opus-4.5",
@@ -399,33 +526,25 @@ def run_realtime_simulation_pipeline(
     event_group_index = load_event_group_index(events_path)
     event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
 
-    news_paths = iter_news_paths(news_base_path, news_since)
-    articles = list(iter_news_articles(news_paths, news_since))
-
-    realtime_service = RealtimeEstimationService(
+    future_service = FutureTimelineService(
         storage=storage,
-        relevance_model=relevance_model,
         timeline_models=timeline_models,
         timeline_temps=timeline_temps,
-        batch_size=batch_size,
     )
-    summaries = realtime_service.process(event_groups, articles, run_id)
+    summaries = future_service.process(event_groups, relevance_run_id, run_id)
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
     run_record = {
         "run_id": run_id,
         "started_at": run_started_at.isoformat(),
         "ended_at": run_finished_at.isoformat(),
-        "news_since": news_since.isoformat(),
-        "news_until": run_finished_at.isoformat(),
-        "articles_considered": len(articles),
+        "relevance_run_id": relevance_run_id,
         "event_group_summaries": summaries,
-        "relevance_model": relevance_model,
         "timeline_models": timeline_models,
         "timeline_temps": timeline_temps,
     }
     storage.append_run_metadata(run_record)
-    logging.info("Realtime simulation run %s completed", run_id)
+    logging.info("Future timeline run %s completed", run_id)
     return run_record
 
 
@@ -443,7 +562,7 @@ def run_simulation_pipeline(
     timeline_temps: list[float] | None = None,
     batch_size: int = 25,
 ) -> dict:
-    """Run present timeline and real-time pipelines for active event groups."""
+    """Run present timeline, relevance, and future timeline pipelines."""
     present = run_present_timeline_pipeline(
         active_event_groups_path=active_event_groups_path,
         events_path=events_path,
@@ -453,14 +572,20 @@ def run_simulation_pipeline(
         min_events=min_events,
         max_events=max_events,
     )
-    realtime = run_realtime_simulation_pipeline(
+    relevance = run_relevance_pipeline(
         active_event_groups_path=active_event_groups_path,
         events_path=events_path,
         news_base_path=news_base_path,
         storage_dir=storage_dir,
         relevance_model=relevance_model,
-        timeline_models=timeline_models,
-        timeline_temps=timeline_temps,
         batch_size=batch_size,
     )
-    return {"present": present, "realtime": realtime}
+    future = run_future_timeline_pipeline(
+        active_event_groups_path=active_event_groups_path,
+        events_path=events_path,
+        storage_dir=storage_dir,
+        relevance_run_id=relevance["run_id"],
+        timeline_models=timeline_models,
+        timeline_temps=timeline_temps,
+    )
+    return {"present": present, "relevance": relevance, "future": future}

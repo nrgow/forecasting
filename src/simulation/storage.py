@@ -49,6 +49,25 @@ class SimulationStorage:
         records = self._iter_jsonl(self.relevance_path)
         return {(record["event_group_id"], record["article_id"]) for record in records}
 
+    def load_relevance_records(self, run_id: str) -> list[dict]:
+        """Return relevance judgment records for a specific run."""
+        records = self._iter_jsonl(self.relevance_path)
+        return [record for record in records if record["run_id"] == run_id]
+
+    def last_relevance_run_id(self) -> str | None:
+        """Return the most recent relevance run id if present."""
+        last = None
+        for record in self._iter_jsonl(self.relevance_path):
+            last = record["run_id"]
+        return last
+
+    def last_relevance_judged_at(self) -> str | None:
+        """Return the most recent relevance judgment timestamp if present."""
+        last = None
+        for record in self._iter_jsonl(self.relevance_path):
+            last = record["judged_at"]
+        return last
+
     def last_run_metadata(self) -> dict | None:
         """Return the last run metadata record if present."""
         last = None

@@ -9,8 +9,8 @@ from .pipeline import (
 )
 from ..simulation.simulation_pipeline import (
     run_present_timeline_pipeline,
-    run_realtime_simulation_pipeline,
-    run_simulation_pipeline,
+    run_relevance_pipeline,
+    run_future_timeline_pipeline,
 )
 
 def run_pipeline():
@@ -41,9 +41,16 @@ def run_pipeline():
         force_present=False,
     )
 
-    run_realtime_simulation_pipeline(
+    relevance_run = run_relevance_pipeline(
         active_event_groups_path=Path("data") / "active_event_groups.jsonl",
         events_path=events_path,
         news_base_path=news_base_path,
         storage_dir=Path("data") / "simulation",
+    )
+
+    run_future_timeline_pipeline(
+        active_event_groups_path=Path("data") / "active_event_groups.jsonl",
+        events_path=events_path,
+        storage_dir=Path("data") / "simulation",
+        relevance_run_id=relevance_run["run_id"],
     )

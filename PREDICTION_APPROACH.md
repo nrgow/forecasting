@@ -13,7 +13,7 @@
 
 ## Realtime Relevance Filtering (article gating)
 
-- Entry point: `RealtimeEstimationService.process` in `src/simulation/simulation_pipeline.py`.
+- Entry point: `RelevanceJudgmentService.process` in `src/simulation/simulation_pipeline.py`.
 - For each `EventGroup`, incoming `NewsArticle` items are batched and judged for relevance using `NewsRelevanceJudge` (LLM prompt via `SelectRelevantArticles`).
 - Relevance decisions are persisted with per-article metadata (IDs, timestamps, model, run_id).
 - Only relevant articles are passed downstream; their headline + description strings become the context set for future timelines.
@@ -21,6 +21,7 @@
 ## Future Timeline Simulation (probability estimation)
 
 - Prompt assembly: `build_future_timeline_prompt` in `src/simulation/simulation_pipeline.py` frames the future timeline question and bounds it by the market end date.
+- Entry point: `FutureTimelineService.process` in `src/simulation/simulation_pipeline.py`.
 - `FutureTimelineEstimator.generate` runs multiple models and temperatures, delegating to `run_model` in `src/simulation/generate_future_timeline.py`.
 - For each model/temperature rollout:
   - `FutureTimeline` generates a simulated future timeline from the scenario, relevant article contexts, and current date.
@@ -33,7 +34,7 @@
 
 1. Generate or load present timelines to ground the event context.
 2. Judge incoming news relevance per event group; store decisions.
-3. For each event group with relevant articles:
+3. For each event group with relevant articles from the relevance run:
    - Build a bounded future-timeline prompt.
    - Run multi-rollout simulations across model/temperature settings.
    - Convert the set of implied-true/false answers into a probability.
