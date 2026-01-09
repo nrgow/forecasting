@@ -575,6 +575,9 @@ td[data-col="event_urls"] {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 .news-card {
@@ -611,6 +614,34 @@ td[data-col="event_urls"] {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--terminal-soft);
+}
+
+.news-pagination {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--terminal-soft);
+}
+
+.news-pagination button {
+  border: 1px solid var(--terminal-line);
+  background: transparent;
+  color: var(--terminal-accent-strong);
+  padding: 6px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.news-pagination button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .timeline-card {
