@@ -6,8 +6,8 @@ from .pipeline import (
     generate_event_table,
     classify_event_geopol_prob,
     download_news_past_week,
-    download_news_past_day,
 )
+from ..news_data import NewsDownloader
 from ..simulation.simulation_pipeline import (
     run_present_timeline_pipeline,
     run_relevance_pipeline,
@@ -19,7 +19,7 @@ def run_pipeline(force_future: bool = False) -> None:
     logging.info("Starting run_pipeline")
     news_base_path = Path("/mnt/ssd") / "newstalk-data" / "gdelt-gal"
     news_base_path.mkdir(parents=True, exist_ok=True)
-    #download_news_past_day(news_base_path)
+    NewsDownloader(news_base_path).download_latest()
 
     events_path = Path("data") / "events.jsonl"
     #fetch_polymarkets_events(events_path)

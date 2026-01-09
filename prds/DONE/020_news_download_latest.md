@@ -1,0 +1,1 @@
+For news downloading we need a new method on the news downloader. And that method is the following. download_latest. And it has the following behavior. It simply starts downloading from the present until it discovers a file that it has already downloaded. And then it stops.
