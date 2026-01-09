@@ -14,7 +14,7 @@ from ..simulation.simulation_pipeline import (
     run_future_timeline_pipeline,
 )
 
-def run_pipeline():
+def run_pipeline(force_future: bool = False) -> None:
     """Run the end-to-end data pipeline."""
     logging.info("Starting run_pipeline")
     news_base_path = Path("/mnt/ssd") / "newstalk-data" / "gdelt-gal"
@@ -56,9 +56,10 @@ def run_pipeline():
         storage_dir=Path("data") / "simulation",
     )
     logging.info("Relevance pipeline completed run_id=%s", relevance_run["run_id"])
-    #run_future_timeline_pipeline(
-    #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
-    #    events_path=events_path,
-    #    storage_dir=Path("data") / "simulation",
-    #    relevance_run_id=relevance_run["run_id"],
-    #)
+    run_future_timeline_pipeline(
+        active_event_groups_path=Path("data") / "active_event_groups.jsonl",
+        events_path=events_path,
+        storage_dir=Path("data") / "simulation",
+        relevance_run_id=relevance_run["run_id"],
+        force_without_relevance=True,
+    )

@@ -15,10 +15,11 @@ class FutureTimeline(dspy.Signature):
 
 
 class TimelineImplication(dspy.Signature):
-    """Given a simulated future timeline and a question related to the timeline, return whether time timeline as stated implies the answer to the question being true"""
+    """Given a simulated future timeline and a question, return whether the timeline implies the answer is true as of the specified date."""
 
     timeline: str = dspy.InputField()
     question_to_answer: str = dspy.InputField()
+    implication_date: str = dspy.InputField()
     implied_answer: bool = dspy.OutputField(
         desc="The answer to the question, given the timeline"
     )
@@ -29,43 +30,57 @@ def run_model(
     scenario,
     contexts,
     current_date,
-    final_question,
+    market_specs,
     temps=[0.1, 0.3, 0.5, 0.7, 0.9],
 ):
     dspy.configure(lm=dspy.LM(model))
     rval = []
     for rollout_id, temp in enumerate(temps):
-        try:
-            timeline_prediction = dspy.Predict(
-                FutureTimeline, rollout_id=rollout_id, temperature=temp
-            )
-            question_answering = dspy.ChainOfThought(TimelineImplication, temperature=0)
+        timeline_prediction = dspy.Predict(
+            FutureTimeline, rollout_id=rollout_id, temperature=temp
+        )
+        question_answering = dspy.ChainOfThought(TimelineImplication, temperature=0)
 
-            timeline = timeline_prediction(
-                timeline_scenario=scenario,
-                contexts=contexts,
-                current_date=current_date,
-            )
+        timeline = timeline_prediction(
+            timeline_scenario=scenario,
+            contexts=contexts,
+            current_date=current_date,
+        )
+        market_implications = []
+        for market in market_specs:
             timeline_implication = question_answering(
-                timeline=timeline.simulated_timeline, question_to_answer=final_question
+                timeline=timeline.simulated_timeline,
+                question_to_answer=market["market_question"],
+                implication_date=market["implication_date"],
             )
-            rval.append(
+            market_implications.append(
                 {
-                    "model": model,
-                    "rollout_id": rollout_id,
-                    "temp": temp,
-                    "simulated_timeline": timeline.simulated_timeline,
-                    "choice": timeline_implication.implied_answer,
+                    "market_id": market["market_id"],
+                    "market_question": market["market_question"],
+                    "market_slug": market["market_slug"],
+                    "market_end_date": market["market_end_date"],
+                    "implication_date": market["implication_date"],
+                    "implied_answer": timeline_implication.implied_answer,
                 }
             )
-        except:
-            rval.append({"model": model, "rollout_id": rollout_id, "error": True})
+        rval.append(
+            {
+                "model": model,
+                "rollout_id": rollout_id,
+                "temp": temp,
+                "simulated_timeline": timeline.simulated_timeline,
+                "market_implications": market_implications,
+            }
+        )
 
     return rval
 
 
 def generate_future_timeline(
-    scenario: str, wiki_context_pages: list[str], current_date: str, final_question: str
+    scenario: str,
+    wiki_context_pages: list[str],
+    current_date: str,
+    market_specs: list[dict],
 ):
     contexts = []
     for page_title in wiki_context_pages:
@@ -85,7 +100,7 @@ def generate_future_timeline(
         scenario=scenario,
         contexts=contexts,
         current_date=current_date,
-        final_question=final_question,
+        market_specs=market_specs,
     )
 
     results = []

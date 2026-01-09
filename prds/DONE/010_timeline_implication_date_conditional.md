@@ -1,0 +1,5 @@
+The timeline implication currently only asks if a question is true or not according to the timeline.
+In order to place um trades on poly market, we need to be able to we can only trade on specific open markets, not on events.
+So an open market has is essentially refers to an event and whether the event occurs at a particular time.
+So we need to be able to generate probability estimates for open markets. And those probability estimates need to be um answering timeline implications that relate to the resolution date of the open market.
+So what we need to do is in the future time timeline generation method, we need to be able to take every active event group, find all open markets associated with that event group, for each open market, we find out the what the actual date is for that open market, what's the resolution date, or what's the event date, and then we need to create a timeline implication with an additional fields and that is the date field, and the timeline implication needs to answer the question: if the event has happened or resolves to true for the simulated timeline at the date of that open market.

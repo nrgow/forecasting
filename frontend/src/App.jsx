@@ -214,6 +214,13 @@ export default function App() {
     return <span className="cell-clip">{text}</span>;
   }
 
+  function formatProbability(value) {
+    if (value === null || value === undefined) {
+      return "—";
+    }
+    return `${(value * 100).toFixed(1)}%`;
+  }
+
   useEffect(() => {
     if (route.type !== "detail") {
       return;
@@ -453,6 +460,55 @@ export default function App() {
               </div>
 
               <div className="detail-section">
+                <h3>Market probabilities</h3>
+                {detail.market_probabilities.length === 0 ? (
+                  <div className="state">No probability estimates yet.</div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="compact-table probability-table">
+                      <thead>
+                        <tr>
+                          <th>Question</th>
+                          <th>Implication date</th>
+                          <th className="numeric-col">Probability</th>
+                          <th className="numeric-col">Samples</th>
+                          <th>Generated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.market_probabilities.map((estimate) => (
+                          <tr key={`${estimate.market_id}-${estimate.generated_at}`}>
+                            <td>
+                              <div className="probability-question">
+                                <strong>{estimate.market_question}</strong>
+                                {estimate.market_slug && (
+                                  <a
+                                    href={`https://polymarket.com/market/${estimate.market_slug}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {estimate.market_slug}
+                                  </a>
+                                )}
+                              </div>
+                            </td>
+                            <td>{estimate.implication_date}</td>
+                            <td className="numeric-col">
+                              <span className="probability-badge">
+                                {formatProbability(estimate.probability)}
+                              </span>
+                            </td>
+                            <td className="numeric-col">{estimate.samples}</td>
+                            <td>{estimate.generated_at}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="detail-section">
                 <h3>Relevant news</h3>
                 {detail.relevant_news.length === 0 ? (
                   <div className="state">No relevant news captured yet.</div>
@@ -520,12 +576,14 @@ export default function App() {
                           {timeline.scenario}
                         </p>
                         {timeline.results.map((result, resultIndex) => (
-                          <pre
+                          <div
                             key={`${timeline.generated_at}-${resultIndex}`}
-                            className="timeline-text"
+                            className="timeline-rollout"
                           >
-                            {result}
-                          </pre>
+                            <pre className="timeline-text">
+                              {result.simulated_timeline}
+                            </pre>
+                          </div>
                         ))}
                       </div>
                     ))}

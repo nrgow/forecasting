@@ -11,7 +11,7 @@ from typing import Iterable
 import dspy
 import more_itertools as mit
 
-from ..prediction_markets import EventGroup, Events
+from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
 from .generate_future_timeline import run_model
 from .generate_present_timeline import generate_present_timeline
 from .news_relevance_dspy import SelectRelevantArticles
@@ -65,9 +65,9 @@ class FutureTimelineEstimator:
         scenario: str,
         contexts: list[str],
         current_date: str,
-        final_question: str,
+        market_specs: list[dict],
     ) -> dict:
-        """Generate future timeline rollouts and implied probability."""
+        """Generate future timeline rollouts and market-level probabilities."""
         results = list(
             chain.from_iterable(
                 run_model(
@@ -75,15 +75,14 @@ class FutureTimelineEstimator:
                     scenario=scenario,
                     contexts=contexts,
                     current_date=current_date,
-                    final_question=final_question,
+                    market_specs=market_specs,
                     temps=self.temps,
                 )
                 for model in self.models
             )
         )
-        choices = [result["choice"] for result in results if "choice" in result]
-        probability = sum(int(choice) for choice in choices) / len(choices) if choices else None
-        return {"results": results, "probability": probability}
+        market_probabilities = aggregate_market_probabilities(results, market_specs)
+        return {"results": results, "market_probabilities": market_probabilities}
 
 
 def recurse_types(js):
@@ -265,6 +264,7 @@ class FutureTimelineService:
         event_groups: list[EventGroup],
         relevance_run_id: str,
         run_id: str,
+        force_without_relevance: bool = False,
     ) -> list[dict]:
         """Generate future timelines for event groups with relevant articles."""
         relevance_records = self.storage.load_relevance_records(relevance_run_id)
@@ -276,19 +276,38 @@ class FutureTimelineService:
         for event_group in event_groups:
             event_group_id = event_group.id()
             if event_group_id not in grouped_records:
-                logging.info(
-                    "Future timeline skipping event_group_id=%s; no relevance records",
-                    event_group_id,
-                )
-                continue
-            records = grouped_records[event_group_id]
+                if not force_without_relevance:
+                    logging.info(
+                        "Future timeline skipping event_group_id=%s; no relevance records",
+                        event_group_id,
+                    )
+                    continue
+                records = self.storage.load_latest_relevance_records_for_group(event_group_id)
+                if records:
+                    logging.info(
+                        "Future timeline using prior relevance records event_group_id=%s records=%s",
+                        event_group_id,
+                        len(records),
+                    )
+                else:
+                    logging.info(
+                        "Future timeline forcing event_group_id=%s; no relevance records",
+                        event_group_id,
+                    )
+            else:
+                records = grouped_records[event_group_id]
             relevant_records = [record for record in records if record["relevant"]]
-            if not relevant_records:
+            if not relevant_records and not force_without_relevance:
                 logging.info(
                     "Future timeline skipping event_group_id=%s; no relevant records",
                     event_group_id,
                 )
                 continue
+            if not relevant_records and force_without_relevance:
+                logging.info(
+                    "Future timeline forcing event_group_id=%s; no relevant records",
+                    event_group_id,
+                )
             logging.info(
                 "Future timeline generating event_group_id=%s relevant_records=%s",
                 event_group_id,
@@ -298,11 +317,18 @@ class FutureTimelineService:
             contexts = list(
                 islice((prompt_text_from_record(record) for record in relevant_records), 50)
             )
+            market_specs = build_market_implication_specs(event_group)
+            if not market_specs:
+                logging.info(
+                    "Future timeline skipping event_group_id=%s; no open markets",
+                    event_group_id,
+                )
+                continue
             timeline_output = self.estimator.generate(
                 scenario=scenario,
                 contexts=contexts,
                 current_date=dt.date.today().isoformat(),
-                final_question=event_group.template_title,
+                market_specs=market_specs,
             )
             generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
             timeline_record = {
@@ -314,20 +340,27 @@ class FutureTimelineService:
                 "models": self.estimator.models,
                 "temps": self.estimator.temps,
                 "results": timeline_output["results"],
-                "relevance_run_id": relevance_run_id,
-                "run_id": run_id,
-            }
-            probability_record = {
-                "event_group_id": event_group_id,
-                "event_group_title": event_group.template_title,
-                "generated_at": generated_at,
-                "probability": timeline_output["probability"],
-                "samples": len(timeline_output["results"]),
+                "market_probabilities": timeline_output["market_probabilities"],
                 "relevance_run_id": relevance_run_id,
                 "run_id": run_id,
             }
             self.storage.append_future_timeline(timeline_record)
-            self.storage.append_probability_estimate(probability_record)
+            for market_probability in timeline_output["market_probabilities"]:
+                probability_record = {
+                    "event_group_id": event_group_id,
+                    "event_group_title": event_group.template_title,
+                    "generated_at": generated_at,
+                    "market_id": market_probability["market_id"],
+                    "market_question": market_probability["market_question"],
+                    "market_slug": market_probability["market_slug"],
+                    "market_end_date": market_probability["market_end_date"],
+                    "implication_date": market_probability["implication_date"],
+                    "probability": market_probability["probability"],
+                    "samples": market_probability["samples"],
+                    "relevance_run_id": relevance_run_id,
+                    "run_id": run_id,
+                }
+                self.storage.append_probability_estimate(probability_record)
             summaries.append(
                 {
                     "event_group_id": event_group_id,
@@ -371,6 +404,54 @@ def build_future_timeline_prompt(event_group: EventGroup) -> str:
         return base_prompt
     event_date = latest_end_date.date().isoformat()
     return f"{base_prompt}\n\nGenerate the future timeline only up to {event_date}."
+
+
+def build_market_implication_specs(event_group: EventGroup) -> list[dict]:
+    """Build market implication specs with resolution dates for open markets."""
+    specs = []
+    for market in event_group.open_markets():
+        if not market.active or market.closed:
+            continue
+        if market.end_date is None:
+            raise ValueError(f"Open market {market.id} missing end_date.")
+        end_date = parse_open_market_end_date(market.end_date).date().isoformat()
+        specs.append(
+            {
+                "market_id": market.id,
+                "market_question": market.question,
+                "market_slug": market.slug,
+                "market_end_date": market.end_date,
+                "implication_date": end_date,
+            }
+        )
+    return specs
+
+
+def aggregate_market_probabilities(
+    results: list[dict], market_specs: list[dict]
+) -> list[dict]:
+    """Aggregate implied answers into market probability estimates."""
+    probabilities = []
+    for market in market_specs:
+        choices = []
+        for result in results:
+            for implication in result["market_implications"]:
+                if implication["market_id"] == market["market_id"]:
+                    choices.append(implication["implied_answer"])
+                    break
+        probability = sum(int(choice) for choice in choices) / len(choices) if choices else None
+        probabilities.append(
+            {
+                "market_id": market["market_id"],
+                "market_question": market["market_question"],
+                "market_slug": market["market_slug"],
+                "market_end_date": market["market_end_date"],
+                "implication_date": market["implication_date"],
+                "probability": probability,
+                "samples": len(choices),
+            }
+        )
+    return probabilities
 
 
 def parse_news_datetime(value: str) -> dt.datetime:
@@ -560,6 +641,7 @@ def run_future_timeline_pipeline(
     relevance_run_id: str | None = None,
     timeline_models: list[str] | None = ["openrouter/x-ai/grok-4.1-fast"],
     timeline_temps: list[float] | None = [0.7],
+    force_without_relevance: bool = False,
 ) -> dict:
     """Run the future timeline pipeline for active event groups."""
     storage = SimulationStorage(storage_dir)
@@ -590,7 +672,12 @@ def run_future_timeline_pipeline(
         timeline_models=timeline_models,
         timeline_temps=timeline_temps,
     )
-    summaries = future_service.process(event_groups, relevance_run_id, run_id)
+    summaries = future_service.process(
+        event_groups,
+        relevance_run_id,
+        run_id,
+        force_without_relevance=force_without_relevance,
+    )
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
     run_record = {

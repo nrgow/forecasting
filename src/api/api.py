@@ -60,6 +60,25 @@ def index_relevance(records: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def index_latest_market_probabilities(records: list[dict]) -> dict[str, list[dict]]:
+    """Index the latest market probabilities per event group."""
+    grouped: dict[str, dict[str, dict]] = defaultdict(dict)
+    for record in records:
+        event_group_id = record["event_group_id"]
+        market_id = record["market_id"]
+        if market_id not in grouped[event_group_id]:
+            grouped[event_group_id][market_id] = record
+            continue
+        if record["generated_at"] > grouped[event_group_id][market_id]["generated_at"]:
+            grouped[event_group_id][market_id] = record
+    return {
+        event_group_id: sorted(
+            markets.values(), key=lambda item: item["generated_at"], reverse=True
+        )
+        for event_group_id, markets in grouped.items()
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the events stats table once at startup."""
@@ -77,6 +96,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.relevance = index_relevance(
         load_jsonl_records(simulation_dir / "realtime_relevance.jsonl")
+    )
+    app.state.market_probabilities = index_latest_market_probabilities(
+        load_jsonl_records(simulation_dir / "estimated_event_probabilities.jsonl")
     )
     yield
 
@@ -134,6 +156,10 @@ def event_group_detail(event_group_id: str) -> dict:
         }
         for record in app.state.future_timelines[event_group_id]
     ]
+    if event_group_id in app.state.market_probabilities:
+        market_probabilities = app.state.market_probabilities[event_group_id]
+    else:
+        market_probabilities = []
     events = [
         {
             "id": event.id,
@@ -151,6 +177,7 @@ def event_group_detail(event_group_id: str) -> dict:
         "active": event_group_id in app.state.active_event_groups,
         "events": events,
         "open_markets": open_markets,
+        "market_probabilities": market_probabilities,
         "relevant_news": relevant_news,
         "present_timeline": present_timeline,
         "future_timelines": future_timelines,

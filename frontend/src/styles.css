@@ -536,6 +536,41 @@ td[data-col="event_urls"] {
   white-space: normal;
 }
 
+.probability-table th,
+.probability-table td {
+  max-width: 360px;
+}
+
+.probability-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probability-question a {
+  color: var(--terminal-accent);
+  font-size: 12px;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.probability-question a:hover {
+  text-decoration: underline;
+}
+
+.probability-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 72px;
+  padding: 4px 8px;
+  border: 1px solid rgba(111, 227, 95, 0.4);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--terminal-positive);
+  background: rgba(111, 227, 95, 0.08);
+}
+
 .news-list {
   display: flex;
   flex-direction: column;
@@ -617,6 +652,12 @@ td[data-col="event_urls"] {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.timeline-rollout {
+  border: 1px dashed rgba(255, 199, 64, 0.35);
+  padding: 12px;
+  background: rgba(4, 6, 8, 0.7);
 }
 
 .keyterm-list {
