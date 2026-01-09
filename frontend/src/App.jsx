@@ -298,11 +298,11 @@ export default function App() {
 
   return (
     <div className="page">
-      <header className="terminal-bar">
-        <div className="terminal-brand">
+      <header className="forecast-bar">
+        <div className="forecast-brand">
           <div className="brand-badge">NT</div>
           <div>
-            <p className="brand-title">NEWSTALK TERMINAL</p>
+            <p className="brand-title">WORLD FORECASTING</p>
             <p className="brand-subtitle">
               {route.type === "detail"
                 ? "Event group profile"
@@ -312,7 +312,7 @@ export default function App() {
             </p>
           </div>
         </div>
-        <div className="terminal-status">
+        <div className="forecast-status">
           <button
             className={`status-pill ${route.type === "table" ? "is-live" : ""}`}
             type="button"
@@ -330,7 +330,7 @@ export default function App() {
             Opportunities
           </button>
         </div>
-        <div className="terminal-ticker">
+        <div className="forecast-ticker">
           {route.type === "opportunities" ? (
             <span>
               {opportunityStatus === "ready"
