@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from plumbum import FG, local
+from plumbum.commands.processes import ProcessExecutionError
 
 
 @dataclass(frozen=True, eq=True, order=True)
@@ -55,36 +56,47 @@ class DateTime:
         return self.datetime.strftime("%Y%m%d%H%M00")
 
 
+class DownloadNotFound(Exception):
+    """Raised when a requested GDELT file is missing (404)."""
+
+
 @dataclass
 class NewsDownloader:
     base_path: Path
 
     def download_latest(self) -> tuple[DateTime, Path]:
-        d = DateTime.now().minus(hours=2)
+        """Download from now until an already-downloaded file is found."""
+        d = DateTime.now()
+        latest_download: tuple[DateTime, Path] | None = None
         while True:
+            filename = self.base_path / f"{d.as_str()}.gal.json.gz"
+            if filename.exists():
+                if latest_download is None:
+                    return d, filename
+                return latest_download
+            logging.info("Trying to download %s", d)
             try:
-                logging.info("Trying to download %s", d)
-                fname = self.download(d)
+                latest_download = (d, self.download(d))
                 logging.info("Download succeeded")
-                return d, fname
-            except:
-                logging.info("Download failed")
-                time.sleep(1)
-                d = d.prev()
+            except DownloadNotFound:
+                logging.info("Download missing; trying previous minute")
+            d = d.prev()
 
     def download_latest_from(self, d: DateTime) -> tuple[DateTime, Path]:
+        """Download from a timestamp until a file is found."""
         while True:
             try:
                 logging.info("Trying to download %s", d)
                 fname = self.download(d)
                 logging.info("Download succeeded")
                 return d, fname
-            except:
-                logging.info("Download failed")
+            except DownloadNotFound:
+                logging.info("Download missing; trying previous minute")
                 time.sleep(1)
                 d = d.prev()
 
     def download(self, datetime: DateTime) -> Path:
+        """Download the GDELT file for a specific minute."""
         # download via plumbum / wget
         url = (
             f"http://data.gdeltproject.org/gdeltv3/gal/{datetime.as_str()}.gal.json.gz"
@@ -97,12 +109,16 @@ class NewsDownloader:
             wget = local["wget"]
             wget["-O", filename, url] & FG
             return filename
-        except:
+        except ProcessExecutionError as exc:
             if filename.exists():
                 filename.unlink()
+            if exc.retcode == 8:
+                logging.info("No file found for %s", datetime)
+                raise DownloadNotFound(datetime) from exc
             raise
 
     def download_range(self, datetime_from: DateTime, datetime_to: DateTime):
+        """Download each minute's file in a range."""
         # download via plumbum / wget
         d = datetime_from
         while d <= datetime_to:
@@ -110,6 +126,7 @@ class NewsDownloader:
             d = d.next()
 
     def download_past_day(self):
+        """Download the past day's news files and yield their paths."""
         # download via plumbum / wget
         d, p = self.download_latest()
         datetime_to = DateTime.now().minus(hours=24)
@@ -119,7 +136,7 @@ class NewsDownloader:
             try:
                 p = self.download(d)
                 yield d, p
-            except:
+            except DownloadNotFound:
                 pass
             d = d.prev()
 
@@ -133,6 +150,6 @@ class NewsDownloader:
             try:
                 p = self.download(d)
                 yield d, p
-            except:
-                pass            
+            except DownloadNotFound:
+                pass
             d = d.prev()
