@@ -463,40 +463,63 @@ class ENPipelineClassifier(Processor):
 
 
 class ZeroShotClassifier(Processor):
+    """Run zero-shot classification with configurable batching."""
     def __init__(
         self,
         model_name="MoritzLaurer/deberta-v3-large-zeroshot-v2.0",
         class_name="international politics",
+        device=None,
+        batch_size=None,
+        torch_dtype=None,
         **kwargs,
     ):
+        """Configure a zero-shot classifier with GPU-friendly defaults."""
+        import torch
+
         self.model_name = model_name
         self.class_name = class_name
         self.class_name_key = class_name.lower().replace(" ", "_")
+        if device is None:
+            device = 0 if torch.cuda.is_available() else -1
+        if batch_size is None:
+            batch_size = 32 if device != -1 else 1
+        if torch_dtype is None and device != -1:
+            torch_dtype = torch.bfloat16
+        self.device = device
+        self.batch_size = batch_size
+        self.torch_dtype = torch_dtype
         self.pipe = None
         self.pipe_kwargs = kwargs
 
     def setup(self):
+        """Initialize the Hugging Face pipeline."""
         self.pipe = pipeline(
             "zero-shot-classification",
-            model="MoritzLaurer/deberta-v3-large-zeroshot-v2.0",
+            model=self.model_name,
+            device=self.device,
+            torch_dtype=self.torch_dtype,
+            **self.pipe_kwargs,
         )
 
     def process(self, data):
-        if (title := data.get("title/arbitrated")) is not None:
-            data[f"zs_clf/{self.class_name_key}"] = self.predict(title)
+        """Score a single record in-place."""
+        title = data["title/arbitrated"]
+        data[f"zs_clf/{self.class_name_key}"] = self.predict(title)
 
     def process_batch(self, data):
+        """Score a batch of records in-place."""
         indices = []
         titles = []
         for idx, el in enumerate(data):
-            if (title := el.get("title/arbitrated")) is not None:
-                titles.append(title)
-                indices.append(idx)
+            title = el["title/arbitrated"]
+            titles.append(title)
+            indices.append(idx)
         scores = self.predict_many(titles)
         for idx, score in zip(indices, scores):
             data[idx][f"zs_clf/{self.class_name_key}"] = score
 
     def predict(self, text):
+        """Score a single text input."""
         if len(text.strip()) == 0:
             return 0
         if self.pipe is None:
@@ -513,6 +536,7 @@ class ZeroShotClassifier(Processor):
         return output["scores"][0]
 
     def predict_many(self, texts):
+        """Score a batch of text inputs."""
         if self.pipe is None:
             self.setup()
         assert self.pipe is not None
@@ -523,10 +547,12 @@ class ZeroShotClassifier(Processor):
             classes_verbalized,
             hypothesis_template=hypothesis_template,
             multi_label=False,
+            batch_size=self.batch_size,
         )
         return [o["scores"][0] for o in output]
 
     def shutdown(self):
+        """Release pipeline resources."""
         del self.pipe
         self.pipe = None
         super().shutdown()
