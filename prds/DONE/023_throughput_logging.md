@@ -1,0 +1,1 @@
+So for the zero shot politics classifier and for the LLM based uh news market relevance classifier, please add some logging that takes place while the news items are being processed, in order to help me understand what is the throughput for both of those modules.

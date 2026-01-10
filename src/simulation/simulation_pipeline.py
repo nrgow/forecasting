@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 from itertools import chain, islice
 from pathlib import Path
@@ -214,9 +215,10 @@ class RelevanceJudgmentService:
             ):
                 batch_list = list(batch)
                 batch_texts = [article.prompt_text() for article in batch_list]
-                relevant_texts = set(
-                    self.judge.select_relevant(query, batch_texts)
-                )
+                started_at = time.perf_counter()
+                relevant_texts = set(self.judge.select_relevant(query, batch_texts))
+                elapsed = time.perf_counter() - started_at
+                items_per_sec = len(batch_list) / elapsed
                 relevant_in_batch = 0
                 for article in batch_list:
                     relevant = article.prompt_text() in relevant_texts
@@ -243,6 +245,15 @@ class RelevanceJudgmentService:
                     total_batches,
                     len(batch_list),
                     relevant_in_batch,
+                )
+                logging.info(
+                    "Relevance throughput event_group_id=%s batch=%s/%s items=%s seconds=%.2f items_per_sec=%.2f",
+                    event_group_id,
+                    batch_index,
+                    total_batches,
+                    len(batch_list),
+                    elapsed,
+                    items_per_sec,
                 )
             summaries.append(
                 {
@@ -548,7 +559,18 @@ def apply_zero_shot_filter(
             if text.strip():
                 indices.append(idx)
                 texts.append(text)
+        started_at = time.perf_counter()
         scores = classifier.predict_many(texts) if texts else []
+        elapsed = time.perf_counter() - started_at
+        if texts:
+            items_per_sec = len(texts) / elapsed
+            logging.info(
+                "Zero-shot throughput class_name=%s items=%s seconds=%.2f items_per_sec=%.2f",
+                class_name,
+                len(texts),
+                elapsed,
+                items_per_sec,
+            )
     finally:
         classifier.shutdown()
     score_map = {idx: score for idx, score in zip(indices, scores)}
