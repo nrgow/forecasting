@@ -17,6 +17,7 @@ class SimulationStorage:
         self.future_timelines_path = self.base_dir / "future_timelines.jsonl"
         self.probabilities_path = self.base_dir / "estimated_event_probabilities.jsonl"
         self.relevance_path = self.base_dir / "realtime_relevance.jsonl"
+        self.zero_shot_path = self.base_dir / "news_zero_shot.jsonl"
         self.runs_path = self.base_dir / "simulation_runs.jsonl"
 
     def append_present_timeline(self, record: dict) -> None:
@@ -34,6 +35,10 @@ class SimulationStorage:
     def append_relevance_judgment(self, record: dict) -> None:
         """Append a relevance judgment record."""
         self._append_jsonl(self.relevance_path, record)
+
+    def append_zero_shot_record(self, record: dict) -> None:
+        """Append a zero-shot classification record."""
+        self._append_jsonl(self.zero_shot_path, record)
 
     def append_run_metadata(self, record: dict) -> None:
         """Append a simulation run metadata record."""
