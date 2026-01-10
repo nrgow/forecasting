@@ -6,7 +6,7 @@ import wikipedia
 
 
 class FutureTimeline(dspy.Signature):
-    """Generate a realistic chronological timeline related to the scenario or topic from the current date to the foreseeable future"""
+    """Continue a realistic chronological timeline from the current date using the provided contexts."""
 
     timeline_scenario: str = dspy.InputField()
     contexts: list[str] = dspy.InputField()

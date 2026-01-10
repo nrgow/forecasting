@@ -1,0 +1,1 @@
+So for the future timeline. I think the prompt should not include any reference to the question that we're asking the question that we're trying to answer. I think instead we should simply ask the LLM to continue the timeline without trying to um steer towards any particular topic.

@@ -12,6 +12,7 @@ import dspy
 import more_itertools as mit
 
 from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
+from ..news_enrichment import ZeroShotClassifier
 from .generate_future_timeline import run_model, sanitize_future_timeline_topic
 from .generate_present_timeline import generate_present_timeline
 from .news_relevance_dspy import SelectRelevantArticles
@@ -419,8 +420,10 @@ def build_sanitized_future_topic(event_group: EventGroup, model: str) -> str:
 
 
 def build_future_timeline_prompt(event_group: EventGroup, model: str) -> str:
-    """Build a prompt for future timeline generation bounded by market end dates."""
-    base_prompt = build_sanitized_future_topic(event_group, model)
+    """Build a neutral prompt for future timeline generation bounded by market end dates."""
+    base_prompt = (
+        "Continue the timeline from the current date using the provided contexts."
+    )
     latest_end_date = event_group.latest_open_market_end_date()
     if latest_end_date is None:
         return base_prompt
@@ -525,6 +528,56 @@ def iter_news_articles(
                 )
 
 
+def apply_zero_shot_filter(
+    articles: list[NewsArticle],
+    storage: SimulationStorage,
+    run_id: str,
+    class_name: str,
+    min_probability: float,
+) -> list[NewsArticle]:
+    """Score articles with zero-shot classifier, persist results, and filter by score."""
+    if not articles:
+        return []
+    classifier = ZeroShotClassifier(class_name=class_name)
+    classifier.setup()
+    try:
+        indices: list[int] = []
+        texts: list[str] = []
+        for idx, article in enumerate(articles):
+            text = article.prompt_text()
+            if text.strip():
+                indices.append(idx)
+                texts.append(text)
+        scores = classifier.predict_many(texts) if texts else []
+    finally:
+        classifier.shutdown()
+    score_map = {idx: score for idx, score in zip(indices, scores)}
+    filtered: list[NewsArticle] = []
+    for idx, article in enumerate(articles):
+        score = score_map.get(idx, 0)
+        record = {
+            "article_id": article.article_id,
+            "article_url": article.url,
+            "article_title": article.title,
+            "article_desc": article.desc,
+            "article_published_at": article.published_at.isoformat(),
+            "article_domain": article.domain,
+            "article_outlet_name": article.outlet_name,
+            "article_lang": article.lang,
+            "zero_shot_class_name": class_name,
+            "zero_shot_class_key": classifier.class_name_key,
+            "zero_shot_score": score,
+            "zero_shot_threshold": min_probability,
+            "zero_shot_passed": score > min_probability,
+            "run_id": run_id,
+            "scored_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        storage.append_zero_shot_record(record)
+        if score > min_probability:
+            filtered.append(article)
+    return filtered
+
+
 def run_present_timeline_pipeline(
     active_event_groups_path: Path,
     events_path: Path,
@@ -603,6 +656,8 @@ def run_relevance_pipeline(
     news_base_path: Path,
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
+    zero_shot_min_probability: float = 0.5,
+    zero_shot_class_name: str = "international politics geopolitics world financial markets",
     batch_size: int = 25,
 ) -> dict:
     """Run the relevance judgment pipeline for active event groups."""
@@ -626,6 +681,14 @@ def run_relevance_pipeline(
 
     news_paths = iter_news_paths(news_base_path, news_since)
     articles = list(iter_news_articles(news_paths, news_since))
+    articles_total = len(articles)
+    articles = apply_zero_shot_filter(
+        articles=articles,
+        storage=storage,
+        run_id=run_id,
+        class_name=zero_shot_class_name,
+        min_probability=zero_shot_min_probability,
+    )
     logging.info(
         "Relevance articles=%s news_paths=%s batch_size=%s",
         len(articles),
@@ -647,9 +710,12 @@ def run_relevance_pipeline(
         "ended_at": run_finished_at.isoformat(),
         "news_since": news_since.isoformat(),
         "news_until": run_finished_at.isoformat(),
+        "articles_total": articles_total,
         "articles_considered": len(articles),
         "event_group_summaries": summaries,
         "relevance_model": relevance_model,
+        "zero_shot_class_name": zero_shot_class_name,
+        "zero_shot_min_probability": zero_shot_min_probability,
     }
     storage.append_run_metadata(run_record)
     logging.info("Relevance run %s completed", run_id)
