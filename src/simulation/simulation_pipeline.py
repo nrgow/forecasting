@@ -18,6 +18,7 @@ from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
 from ..news_enrichment import ZeroShotClassifier
 from .generate_future_timeline import run_model, sanitize_future_timeline_topic
 from .generate_present_timeline import generate_present_timeline
+from .bm25_retriever import BM25NewsIndex, BM25SearchTool, DeepSearchAgent
 from .news_relevance_dspy import SelectRelevantArticles
 from .storage import SimulationStorage
 
@@ -361,6 +362,91 @@ class RelevanceJudgmentService:
         return summaries
 
 
+class AgenticRelevanceService:
+    """Agentic BM25 retrieval and relevance selection for event groups."""
+
+    def __init__(
+        self,
+        storage: SimulationStorage,
+        relevance_model: str,
+        search_top_k: int,
+        max_iters: int,
+        max_results: int,
+    ) -> None:
+        """Initialize the service with BM25 retrieval settings."""
+        self.storage = storage
+        self.relevance_model = relevance_model
+        self.search_top_k = search_top_k
+        self.max_iters = max_iters
+        self.max_results = max_results
+
+    def process(
+        self,
+        event_groups: list[EventGroup],
+        bm25_index: BM25NewsIndex,
+        present_timeline_index: dict[str, dict],
+        run_id: str,
+    ) -> tuple[list[dict], int]:
+        """Retrieve and store agent-selected relevance records."""
+        summaries = []
+        total_candidates = 0
+        for event_group in event_groups:
+            event_group_id = event_group.id()
+            present_record = present_timeline_index[event_group_id]
+            present_timeline = build_present_timeline_context(present_record)
+            search_tool = BM25SearchTool(bm25_index, default_top_k=self.search_top_k)
+            agent = DeepSearchAgent(
+                model=self.relevance_model,
+                search_tool=search_tool,
+                max_iters=self.max_iters,
+            )
+            event_prompt = build_event_group_prompt(event_group)
+            relevant_article_ids = agent.find_relevant(
+                event_group_prompt=event_prompt,
+                present_timeline=present_timeline,
+                max_results=self.max_results,
+            )
+            candidate_articles = search_tool.collected_articles()
+            candidate_ids = {article.article_id for article in candidate_articles}
+            unknown_ids = [article_id for article_id in relevant_article_ids if article_id not in candidate_ids]
+            if unknown_ids:
+                raise ValueError(
+                    "Deep search agent returned unknown article ids "
+                    f"event_group_id={event_group_id} unknown_ids={unknown_ids}"
+                )
+            relevant_set = set(relevant_article_ids)
+            for article in candidate_articles:
+                relevant = article.article_id in relevant_set
+                record = {
+                    "event_group_id": event_group_id,
+                    "article_id": article.article_id,
+                    "article_url": article.url,
+                    "article_title": article.title,
+                    "article_desc": article.desc,
+                    "article_published_at": article.published_at.isoformat(),
+                    "relevant": relevant,
+                    "judged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "model": self.relevance_model,
+                    "run_id": run_id,
+                    "dedup_cluster_id": None,
+                    "dedup_cluster_size": None,
+                    "dedup_representative_id": None,
+                    "dedup_representative": None,
+                    "retrieval_strategy": "lazy",
+                }
+                self.storage.append_relevance_judgment(record)
+            total_candidates += len(candidate_articles)
+            summaries.append(
+                {
+                    "event_group_id": event_group_id,
+                    "articles_considered": len(candidate_articles),
+                    "relevant_articles": len(relevant_set),
+                    "bm25_queries": len(search_tool.query_log),
+                }
+            )
+        return summaries, total_candidates
+
+
 class FutureTimelineService:
     """Generate future timelines from relevance judgments."""
 
@@ -510,6 +596,11 @@ def build_event_group_prompt(event_group: EventGroup) -> str:
     unique_descriptions = list(mit.unique_everseen(descriptions))
     description_text = "\n\n".join(unique_descriptions)
     return f"{event_group.template_title}\n\n{description_text}".strip()
+
+
+def build_present_timeline_context(record: dict) -> str:
+    """Return the present timeline text for an event group record."""
+    return record["timeline"]["merged"]["merged_timeline"]
 
 
 def prompt_text_from_record(record: dict) -> str:
@@ -758,6 +849,10 @@ def run_realtime_simulation_pipeline(
     news_base_path: Path,
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
+    use_lazy_retriever: bool = False,
+    lazy_search_top_k: int = 25,
+    lazy_max_iters: int = 6,
+    lazy_max_results: int = 50,
     timeline_models: list[str] | None = ["openrouter/x-ai/grok-4.1-fast"],
     timeline_temps: list[float] | None = [0.7],
     batch_size: int = 25,
@@ -770,6 +865,10 @@ def run_realtime_simulation_pipeline(
         news_base_path=news_base_path,
         storage_dir=storage_dir,
         relevance_model=relevance_model,
+        use_lazy_retriever=use_lazy_retriever,
+        lazy_search_top_k=lazy_search_top_k,
+        lazy_max_iters=lazy_max_iters,
+        lazy_max_results=lazy_max_results,
         batch_size=batch_size,
     )
     future = run_future_timeline_pipeline(
@@ -789,6 +888,10 @@ def run_relevance_pipeline(
     news_base_path: Path,
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
+    use_lazy_retriever: bool = False,
+    lazy_search_top_k: int = 25,
+    lazy_max_iters: int = 6,
+    lazy_max_results: int = 50,
     zero_shot_min_probability: float = 0.5,
     zero_shot_class_name: str = "international politics geopolitics world financial markets",
     dedup_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
@@ -818,34 +921,61 @@ def run_relevance_pipeline(
     news_paths = iter_news_paths(news_base_path, news_since)
     articles = list(iter_news_articles(news_paths, news_since))
     articles_total = len(articles)
-    articles = apply_zero_shot_filter(
-        articles=articles,
-        storage=storage,
-        run_id=run_id,
-        class_name=zero_shot_class_name,
-        min_probability=zero_shot_min_probability,
-    )
-    dedup_clusters = apply_semantic_deduplication(
-        articles=articles,
-        model_name=dedup_model_name,
-        similarity_threshold=dedup_similarity_threshold,
-        batch_size=dedup_batch_size,
-    )
-    dedup_ratio = len(dedup_clusters) / len(articles) if articles else 0.0
-    logging.info(
-        "Relevance articles=%s clusters=%s news_paths=%s batch_size=%s",
-        len(articles),
-        len(dedup_clusters),
-        len(news_paths),
-        batch_size,
-    )
+    if use_lazy_retriever:
+        logging.info(
+            "Relevance lazy retrieval articles=%s news_paths=%s",
+            len(articles),
+            len(news_paths),
+        )
+        present_timeline_index = storage.load_present_timeline_index()
+        bm25_index = BM25NewsIndex(articles)
+        relevance_service = AgenticRelevanceService(
+            storage=storage,
+            relevance_model=relevance_model,
+            search_top_k=lazy_search_top_k,
+            max_iters=lazy_max_iters,
+            max_results=lazy_max_results,
+        )
+        summaries, total_candidates = relevance_service.process(
+            event_groups=event_groups,
+            bm25_index=bm25_index,
+            present_timeline_index=present_timeline_index,
+            run_id=run_id,
+        )
+        articles_considered = total_candidates
+        clusters_considered = None
+        dedup_ratio = None
+    else:
+        articles = apply_zero_shot_filter(
+            articles=articles,
+            storage=storage,
+            run_id=run_id,
+            class_name=zero_shot_class_name,
+            min_probability=zero_shot_min_probability,
+        )
+        dedup_clusters = apply_semantic_deduplication(
+            articles=articles,
+            model_name=dedup_model_name,
+            similarity_threshold=dedup_similarity_threshold,
+            batch_size=dedup_batch_size,
+        )
+        dedup_ratio = len(dedup_clusters) / len(articles) if articles else 0.0
+        logging.info(
+            "Relevance articles=%s clusters=%s news_paths=%s batch_size=%s",
+            len(articles),
+            len(dedup_clusters),
+            len(news_paths),
+            batch_size,
+        )
 
-    relevance_service = RelevanceJudgmentService(
-        storage=storage,
-        relevance_model=relevance_model,
-        batch_size=batch_size,
-    )
-    summaries = relevance_service.process(event_groups, dedup_clusters, run_id)
+        relevance_service = RelevanceJudgmentService(
+            storage=storage,
+            relevance_model=relevance_model,
+            batch_size=batch_size,
+        )
+        summaries = relevance_service.process(event_groups, dedup_clusters, run_id)
+        articles_considered = len(articles)
+        clusters_considered = len(dedup_clusters)
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
     run_record = {
@@ -855,16 +985,22 @@ def run_relevance_pipeline(
         "news_since": news_since.isoformat(),
         "news_until": run_finished_at.isoformat(),
         "articles_total": articles_total,
-        "articles_considered": len(articles),
-        "clusters_considered": len(dedup_clusters),
+        "articles_considered": articles_considered,
+        "clusters_considered": clusters_considered,
         "dedup_ratio": dedup_ratio,
         "event_group_summaries": summaries,
         "relevance_model": relevance_model,
-        "zero_shot_class_name": zero_shot_class_name,
-        "zero_shot_min_probability": zero_shot_min_probability,
-        "dedup_model_name": dedup_model_name,
-        "dedup_similarity_threshold": dedup_similarity_threshold,
-        "dedup_batch_size": dedup_batch_size,
+        "retrieval_strategy": "lazy" if use_lazy_retriever else "eager",
+        "bm25_indexed_articles": articles_total if use_lazy_retriever else None,
+        "bm25_candidates": articles_considered if use_lazy_retriever else None,
+        "lazy_search_top_k": lazy_search_top_k if use_lazy_retriever else None,
+        "lazy_max_iters": lazy_max_iters if use_lazy_retriever else None,
+        "lazy_max_results": lazy_max_results if use_lazy_retriever else None,
+        "zero_shot_class_name": zero_shot_class_name if not use_lazy_retriever else None,
+        "zero_shot_min_probability": zero_shot_min_probability if not use_lazy_retriever else None,
+        "dedup_model_name": dedup_model_name if not use_lazy_retriever else None,
+        "dedup_similarity_threshold": dedup_similarity_threshold if not use_lazy_retriever else None,
+        "dedup_batch_size": dedup_batch_size if not use_lazy_retriever else None,
     }
     storage.append_run_metadata(run_record)
     logging.info("Relevance run %s completed", run_id)
@@ -946,6 +1082,10 @@ def run_simulation_pipeline(
     min_events: int | None = None,
     max_events: int | None = None,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
+    use_lazy_retriever: bool = False,
+    lazy_search_top_k: int = 25,
+    lazy_max_iters: int = 6,
+    lazy_max_results: int = 50,
     timeline_models: list[str] | None = None,
     timeline_temps: list[float] | None = None,
     timeline_rollouts: int | None = None,
@@ -968,6 +1108,10 @@ def run_simulation_pipeline(
         news_base_path=news_base_path,
         storage_dir=storage_dir,
         relevance_model=relevance_model,
+        use_lazy_retriever=use_lazy_retriever,
+        lazy_search_top_k=lazy_search_top_k,
+        lazy_max_iters=lazy_max_iters,
+        lazy_max_results=lazy_max_results,
         batch_size=batch_size,
     )
     future = run_future_timeline_pipeline(

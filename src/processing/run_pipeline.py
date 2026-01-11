@@ -14,7 +14,7 @@ from ..simulation.simulation_pipeline import (
     run_future_timeline_pipeline,
 )
 
-def run_pipeline(force_future: bool = False) -> None:
+def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = False) -> None:
     """Run the end-to-end data pipeline."""
     logging.info("Starting run_pipeline")
     news_base_path = Path("/mnt/ssd") / "newstalk-data" / "gdelt-gal"
@@ -54,6 +54,7 @@ def run_pipeline(force_future: bool = False) -> None:
         events_path=events_path,
         news_base_path=news_base_path,
         storage_dir=Path("data") / "simulation",
+        use_lazy_retriever=use_lazy_retriever,
     )
     logging.info("Relevance pipeline completed run_id=%s", relevance_run["run_id"])
     run_future_timeline_pipeline(
