@@ -11,6 +11,8 @@ from typing import Iterable
 
 import dspy
 import more_itertools as mit
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
 from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
 from ..news_enrichment import ZeroShotClassifier
@@ -36,6 +38,72 @@ class NewsArticle:
     def prompt_text(self) -> str:
         """Return the text used for relevance judgment."""
         return f"{self.title}\n\n{self.desc}".strip()
+
+
+@dataclass
+class ArticleCluster:
+    """Cluster of semantically near-duplicate articles."""
+
+    cluster_id: str
+    representative: NewsArticle
+    members: list[NewsArticle]
+
+
+class SemanticDeduplicator:
+    """Cluster near-duplicate articles using sentence embeddings."""
+
+    def __init__(
+        self,
+        model_name: str,
+        similarity_threshold: float,
+        batch_size: int,
+    ) -> None:
+        """Initialize the deduplicator with model and similarity settings."""
+        self.model_name = model_name
+        self.similarity_threshold = similarity_threshold
+        self.batch_size = batch_size
+        self.model = SentenceTransformer(self.model_name, device="cuda")
+
+    def _embed(self, texts: list[str]) -> np.ndarray:
+        """Return normalized embeddings for the provided texts."""
+        embeddings = self.model.encode(
+            texts,
+            batch_size=self.batch_size,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        return np.asarray(embeddings)
+
+    def cluster(self, articles: list[NewsArticle]) -> list[ArticleCluster]:
+        """Return clusters of articles based on cosine similarity."""
+        if not articles:
+            return []
+        texts = [article.prompt_text() for article in articles]
+        embeddings = self._embed(texts)
+        assigned = np.zeros(len(articles), dtype=bool)
+        clusters: list[ArticleCluster] = []
+        for idx in range(len(articles)):
+            if assigned[idx]:
+                continue
+            similarities = embeddings @ embeddings[idx]
+            members_idx = np.where(similarities >= self.similarity_threshold)[0].tolist()
+            members_idx = [member_idx for member_idx in members_idx if not assigned[member_idx]]
+            for member_idx in members_idx:
+                assigned[member_idx] = True
+            representative_idx = max(
+                members_idx, key=lambda member_idx: articles[member_idx].published_at
+            )
+            members = [articles[member_idx] for member_idx in members_idx]
+            cluster_key = "|".join(sorted(member.article_id for member in members))
+            cluster_id = hashlib.sha256(cluster_key.encode("utf-8")).hexdigest()
+            clusters.append(
+                ArticleCluster(
+                    cluster_id=cluster_id,
+                    representative=articles[representative_idx],
+                    members=members,
+                )
+            )
+        return clusters
 
 
 class NewsRelevanceJudge:
@@ -189,25 +257,27 @@ class RelevanceJudgmentService:
     def process(
         self,
         event_groups: list[EventGroup],
-        articles: list[NewsArticle],
+        clusters: list[ArticleCluster],
         run_id: str,
     ) -> list[dict]:
         """Judge relevance and store results."""
         logging.info(
-            "Relevance judgment starting event_groups=%s articles=%s batch_size=%s",
+            "Relevance judgment starting event_groups=%s clusters=%s batch_size=%s",
             len(event_groups),
-            len(articles),
+            len(clusters),
             self.batch_size,
         )
         existing = self.storage.load_relevance_index()
         summaries = []
         for event_group in event_groups:
             event_group_id = event_group.id()
-            candidates = [
-                article
-                for article in articles
-                if (event_group_id, article.article_id) not in existing
-            ]
+            candidates = []
+            for cluster in clusters:
+                if any(
+                    (event_group_id, member.article_id) not in existing
+                    for member in cluster.members
+                ):
+                    candidates.append(cluster)
             if not candidates:
                 logging.info(
                     "Relevance skipping event_group_id=%s; no candidates",
@@ -222,37 +292,49 @@ class RelevanceJudgmentService:
                 total_batches,
             )
             relevant_articles = 0
+            considered_articles = 0
             query = build_event_group_prompt(event_group)
             for batch_index, batch in enumerate(
                 mit.chunked(candidates, self.batch_size), start=1
             ):
                 batch_list = list(batch)
-                batch_texts = [article.prompt_text() for article in batch_list]
+                batch_texts = [
+                    cluster.representative.prompt_text() for cluster in batch_list
+                ]
                 started_at = time.perf_counter()
                 relevant_texts = set(self.judge.select_relevant(query, batch_texts))
                 elapsed = time.perf_counter() - started_at
                 items_per_sec = len(batch_list) / elapsed
                 relevant_in_batch = 0
-                for article in batch_list:
-                    relevant = article.prompt_text() in relevant_texts
-                    record = {
-                        "event_group_id": event_group_id,
-                        "article_id": article.article_id,
-                        "article_url": article.url,
-                        "article_title": article.title,
-                        "article_desc": article.desc,
-                        "article_published_at": article.published_at.isoformat(),
-                        "relevant": relevant,
-                        "judged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                        "model": self.judge.model,
-                        "run_id": run_id,
-                    }
-                    self.storage.append_relevance_judgment(record)
-                    if relevant:
-                        relevant_in_batch += 1
-                        relevant_articles += 1
+                for cluster in batch_list:
+                    relevant = cluster.representative.prompt_text() in relevant_texts
+                    for member in cluster.members:
+                        if (event_group_id, member.article_id) in existing:
+                            continue
+                        record = {
+                            "event_group_id": event_group_id,
+                            "article_id": member.article_id,
+                            "article_url": member.url,
+                            "article_title": member.title,
+                            "article_desc": member.desc,
+                            "article_published_at": member.published_at.isoformat(),
+                            "relevant": relevant,
+                            "judged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                            "model": self.judge.model,
+                            "run_id": run_id,
+                            "dedup_cluster_id": cluster.cluster_id,
+                            "dedup_cluster_size": len(cluster.members),
+                            "dedup_representative_id": cluster.representative.article_id,
+                            "dedup_representative": member.article_id
+                            == cluster.representative.article_id,
+                        }
+                        self.storage.append_relevance_judgment(record)
+                        considered_articles += 1
+                        if relevant:
+                            relevant_in_batch += 1
+                            relevant_articles += 1
                 logging.info(
-                    "Relevance batch event_group_id=%s batch=%s/%s batch_size=%s relevant=%s",
+                    "Relevance batch event_group_id=%s batch=%s/%s batch_size=%s relevant_articles=%s",
                     event_group_id,
                     batch_index,
                     total_batches,
@@ -271,7 +353,8 @@ class RelevanceJudgmentService:
             summaries.append(
                 {
                     "event_group_id": event_group_id,
-                    "articles_considered": len(candidates),
+                    "clusters_considered": len(candidates),
+                    "articles_considered": considered_articles,
                     "relevant_articles": relevant_articles,
                 }
             )
@@ -613,6 +696,21 @@ def apply_zero_shot_filter(
     return filtered
 
 
+def apply_semantic_deduplication(
+    articles: list[NewsArticle],
+    model_name: str,
+    similarity_threshold: float,
+    batch_size: int,
+) -> list[ArticleCluster]:
+    """Cluster near-duplicate articles to reduce relevance calls."""
+    deduplicator = SemanticDeduplicator(
+        model_name=model_name,
+        similarity_threshold=similarity_threshold,
+        batch_size=batch_size,
+    )
+    return deduplicator.cluster(articles)
+
+
 def run_present_timeline_pipeline(
     active_event_groups_path: Path,
     events_path: Path,
@@ -693,6 +791,9 @@ def run_relevance_pipeline(
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     zero_shot_min_probability: float = 0.5,
     zero_shot_class_name: str = "international politics geopolitics world financial markets",
+    dedup_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    dedup_similarity_threshold: float = 0.92,
+    dedup_batch_size: int = 128,
     batch_size: int = 25,
 ) -> dict:
     """Run the relevance judgment pipeline for active event groups."""
@@ -724,9 +825,17 @@ def run_relevance_pipeline(
         class_name=zero_shot_class_name,
         min_probability=zero_shot_min_probability,
     )
+    dedup_clusters = apply_semantic_deduplication(
+        articles=articles,
+        model_name=dedup_model_name,
+        similarity_threshold=dedup_similarity_threshold,
+        batch_size=dedup_batch_size,
+    )
+    dedup_ratio = len(dedup_clusters) / len(articles) if articles else 0.0
     logging.info(
-        "Relevance articles=%s news_paths=%s batch_size=%s",
+        "Relevance articles=%s clusters=%s news_paths=%s batch_size=%s",
         len(articles),
+        len(dedup_clusters),
         len(news_paths),
         batch_size,
     )
@@ -736,7 +845,7 @@ def run_relevance_pipeline(
         relevance_model=relevance_model,
         batch_size=batch_size,
     )
-    summaries = relevance_service.process(event_groups, articles, run_id)
+    summaries = relevance_service.process(event_groups, dedup_clusters, run_id)
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
     run_record = {
@@ -747,10 +856,15 @@ def run_relevance_pipeline(
         "news_until": run_finished_at.isoformat(),
         "articles_total": articles_total,
         "articles_considered": len(articles),
+        "clusters_considered": len(dedup_clusters),
+        "dedup_ratio": dedup_ratio,
         "event_group_summaries": summaries,
         "relevance_model": relevance_model,
         "zero_shot_class_name": zero_shot_class_name,
         "zero_shot_min_probability": zero_shot_min_probability,
+        "dedup_model_name": dedup_model_name,
+        "dedup_similarity_threshold": dedup_similarity_threshold,
+        "dedup_batch_size": dedup_batch_size,
     }
     storage.append_run_metadata(run_record)
     logging.info("Relevance run %s completed", run_id)

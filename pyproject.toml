@@ -34,4 +34,5 @@ dependencies = [
     "markdownify>=1.2.2",
     "sqlitedict>=2.1.0",
     "uvicorn>=0.40.0",
+    "numpy>=2.3.2",
 ]
