@@ -1,0 +1,4 @@
+In the events group UI view, we currently show the generated future timelines.
+I'd like to add a small visual element for each generated timeline, which can show how the um what was the implication of the timeline for the event under question.
+So of course the timeline implication is with respect to an open market, not with respect to an event group. So it should the visual element should show for all for each open market associated with the event group how that timeline uh hypothetically resolves um for the respective open market.
+Secondly, we should only show the most recent batch of future timelines. Or at least one should definitely sort them by sort the groups batch of timelines and with the most recently generated ones coming first.

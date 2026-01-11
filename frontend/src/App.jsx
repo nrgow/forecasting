@@ -25,6 +25,18 @@ export default function App() {
   const [opportunities, setOpportunities] = useState(EMPTY_LIST);
   const [opportunityStatus, setOpportunityStatus] = useState("idle");
   const [opportunityError, setOpportunityError] = useState("");
+  const latestFutureTimelines = useMemo(() => {
+    if (!detail || detail.future_timelines.length === 0) {
+      return EMPTY_LIST;
+    }
+    const sorted = [...detail.future_timelines].sort(
+      (a, b) => new Date(b.generated_at) - new Date(a.generated_at)
+    );
+    const latestGeneratedAt = sorted[0].generated_at;
+    return sorted.filter(
+      (timeline) => timeline.generated_at === latestGeneratedAt
+    );
+  }, [detail]);
 
   const route = useMemo(() => {
     const match = path.match(DETAIL_ROUTE);
@@ -717,9 +729,9 @@ export default function App() {
                 ) : (
                   <div className="state">No present timeline stored.</div>
                 )}
-                {detail.future_timelines.length > 0 && (
+                {latestFutureTimelines.length > 0 && (
                   <div className="timeline-stack">
-                    {detail.future_timelines.map((timeline, index) => (
+                    {latestFutureTimelines.map((timeline, index) => (
                       <div
                         key={`${timeline.generated_at}-${index}`}
                         className="timeline-card"
@@ -739,6 +751,43 @@ export default function App() {
                             <pre className="timeline-text">
                               {result.simulated_timeline}
                             </pre>
+                            {detail.open_markets.length > 0 && (
+                              <div className="timeline-implications">
+                                {detail.open_markets.map((market) => {
+                                  const implication =
+                                    result.market_implications.find(
+                                      (item) => item.market_id === market.id
+                                    );
+                                  const outcome = implication
+                                    ? implication.implied_answer
+                                      ? "Yes"
+                                      : "No"
+                                    : "n/a";
+                                  const outcomeClass = implication
+                                    ? implication.implied_answer
+                                      ? "is-yes"
+                                      : "is-no"
+                                    : "is-unknown";
+                                  const label = market.slug || market.question;
+                                  return (
+                                    <div
+                                      key={`${timeline.generated_at}-${resultIndex}-${market.id}`}
+                                      className="timeline-implication-chip"
+                                      title={market.question}
+                                    >
+                                      <span className="timeline-implication-label">
+                                        {label}
+                                      </span>
+                                      <span
+                                        className={`timeline-implication-outcome ${outcomeClass}`}
+                                      >
+                                        {outcome}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
