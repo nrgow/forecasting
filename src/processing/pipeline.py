@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import logging
+import math
 from pathlib import Path
 
 import more_itertools as mit
@@ -74,6 +75,20 @@ def generate_event_table(
     polymarket_geopol_prob_path: Path,
     polymarket_events_path: Path,
 ):
+    def composite_event_group_score(
+        total_liq: float,
+        total_vol: float,
+        total_vol_1wk: float,
+        geopol_prob: float,
+    ) -> float:
+        """Compute a composite ranking score from liquidity, volume, and theme probability."""
+        activity = (
+            math.log1p(total_liq)
+            + math.log1p(total_vol)
+            + math.log1p(total_vol_1wk)
+        )
+        return geopol_prob * activity
+
     event_geopol_prob = dict[str, float]()
     with open(polymarket_geopol_prob_path) as i:
         for line in i:
@@ -87,24 +102,36 @@ def generate_event_table(
             event_group_open_markets = list(event_group.open_markets())
             total_liq = sum([m.liquidity for m in event_group_open_markets if m.liquidity is not None], 0)
             total_vol = sum([m.volume for m in event_group_open_markets if m.volume is not None], 0)
+            total_vol_1wk = sum(
+                [m.volume_1wk for m in event_group_open_markets if m.volume_1wk is not None],
+                0,
+            )
             num_open_markets = len(event_group_open_markets)
             event_urls = "\n".join([e.url() for e in event_group.events])
             event_names = "\n".join([e.title for e in event_group.events])
             yes_probs: list[float] = list(filter(None, [m.yes_probability() for m in event_group_open_markets]))
             max_uncertainty = max(4*yes_prob*(1 - yes_prob) for yes_prob in yes_probs) if yes_probs else None
             event_group_id = event_group.id()
-            event_group_geopol_prob = event_geopol_prob.get(event_group_id)
+            event_group_geopol_prob = event_geopol_prob[event_group_id]
+            composite_score = composite_event_group_score(
+                total_liq,
+                total_vol,
+                total_vol_1wk,
+                event_group_geopol_prob,
+            )
             print(
                 json.dumps(
                     {
                         "event_group_id": event_group_id,
                         "total_liq": total_liq,
                         "total_vol": total_vol,
+                        "total_vol_1wk": total_vol_1wk,
                         "num_open_markets": num_open_markets,
                         "event_urls": event_urls,
                         "event_names": event_names,
                         "max_uncertainty": max_uncertainty,
-                        "event_group_geopol_prob": event_group_geopol_prob
+                        "event_group_geopol_prob": event_group_geopol_prob,
+                        "composite_score": composite_score,
                     }
                 ),
                 file=o

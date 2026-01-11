@@ -26,6 +26,7 @@ class OpenMarket:
     slug: str
     liquidity: float | None
     volume: float | None
+    volume_1wk: float | None
     end_date: str | None
     active: bool
     closed: bool
@@ -47,6 +48,10 @@ class OpenMarket:
             volume = float(data["volume"])
         else:
             volume = None
+        if "volume1wk" in data:
+            volume_1wk = float(data["volume1wk"])
+        else:
+            volume_1wk = None
         # event = MarketEvent.from_api(data["event"])
         return cls(
             id=str(data.get("id", "")),
@@ -54,6 +59,7 @@ class OpenMarket:
             slug=str(data.get("slug", "")),
             liquidity=liquidity,
             volume=volume,
+            volume_1wk=volume_1wk,
             end_date=data.get("endDateIso") or data.get("endDate"),
             active=bool(data.get("active", False)),
             closed=bool(data.get("closed", False)),
