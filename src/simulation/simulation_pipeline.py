@@ -51,6 +51,19 @@ class NewsRelevanceJudge:
         """Return the subset of article strings judged relevant to the query."""
         dspy.configure(lm=dspy.LM(self.model))
         result = self.module(query_or_article=query, articles=articles)
+        if result is None:
+            raise ValueError(
+                f"Relevance model returned no result for model={self.model} articles={len(articles)}"
+            )
+        if result.relevant_articles is None:
+            raise ValueError(
+                f"Relevance model returned no relevant_articles for model={self.model} articles={len(articles)}"
+            )
+        if not isinstance(result.relevant_articles, list):
+            raise ValueError(
+                "Relevance model returned non-list relevant_articles "
+                f"type={type(result.relevant_articles)} model={self.model}"
+            )
         return result.relevant_articles
 
 
