@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -25,6 +32,9 @@ export default function App() {
   const [opportunities, setOpportunities] = useState(EMPTY_LIST);
   const [opportunityStatus, setOpportunityStatus] = useState("idle");
   const [opportunityError, setOpportunityError] = useState("");
+  const tableWrapRef = useRef(null);
+  const tableScrollTopRef = useRef(null);
+  const tableScrollTopInnerRef = useRef(null);
   const latestFutureTimelines = useMemo(() => {
     if (!detail || detail.future_timelines.length === 0) {
       return EMPTY_LIST;
@@ -188,6 +198,64 @@ export default function App() {
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel()
   });
+
+  useLayoutEffect(() => {
+    const wrap = tableWrapRef.current;
+    const top = tableScrollTopRef.current;
+    const inner = tableScrollTopInnerRef.current;
+    if (!wrap || !top || !inner) {
+      return undefined;
+    }
+    const update = () => {
+      inner.style.width = `${wrap.scrollWidth}px`;
+      top.scrollLeft = wrap.scrollLeft;
+    };
+    update();
+    window.addEventListener("resize", update);
+    let resizeObserver;
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(wrap);
+    }
+    return () => {
+      window.removeEventListener("resize", update);
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+    };
+  }, [activeOnly, route.type, sorting, status, visibleRows.length]);
+
+  useEffect(() => {
+    const wrap = tableWrapRef.current;
+    const top = tableScrollTopRef.current;
+    if (!wrap || !top) {
+      return undefined;
+    }
+    let syncingFromTop = false;
+    let syncingFromWrap = false;
+    const onTopScroll = () => {
+      if (syncingFromWrap) {
+        syncingFromWrap = false;
+        return;
+      }
+      syncingFromTop = true;
+      wrap.scrollLeft = top.scrollLeft;
+    };
+    const onWrapScroll = () => {
+      if (syncingFromTop) {
+        syncingFromTop = false;
+        return;
+      }
+      syncingFromWrap = true;
+      top.scrollLeft = wrap.scrollLeft;
+    };
+    top.addEventListener("scroll", onTopScroll);
+    wrap.addEventListener("scroll", onWrapScroll);
+    return () => {
+      top.removeEventListener("scroll", onTopScroll);
+      wrap.removeEventListener("scroll", onWrapScroll);
+    };
+  }, [route.type, status, visibleRows.length]);
 
   function formatCellValue(key, value) {
     if (value === null || value === undefined) {
@@ -391,7 +459,10 @@ export default function App() {
                   Showing {visibleRows.length} of {rows.length} groups
                 </div>
               </div>
-              <div className="table-wrap">
+              <div className="table-scroll-top" ref={tableScrollTopRef} aria-hidden="true">
+                <div className="table-scroll-top-inner" ref={tableScrollTopInnerRef} />
+              </div>
+              <div className="table-wrap" ref={tableWrapRef}>
                 <table>
                   <thead>
                     {table.getHeaderGroups().map((headerGroup) => (
