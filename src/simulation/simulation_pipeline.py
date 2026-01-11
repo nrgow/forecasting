@@ -392,6 +392,13 @@ class AgenticRelevanceService:
         total_candidates = 0
         for event_group in event_groups:
             event_group_id = event_group.id()
+            logging.info(
+                "Relevance lazy agent starting event_group_id=%s max_iters=%s max_results=%s search_top_k=%s",
+                event_group_id,
+                self.max_iters,
+                self.max_results,
+                self.search_top_k,
+            )
             present_record = present_timeline_index[event_group_id]
             present_timeline = build_present_timeline_context(present_record)
             search_tool = BM25SearchTool(bm25_index, default_top_k=self.search_top_k)
@@ -859,6 +866,10 @@ def run_realtime_simulation_pipeline(
 ) -> dict:
     """Run the real-time simulation pipeline for active event groups."""
     logging.info("Real-time simulation pipeline starting")
+    logging.info(
+        "Real-time relevance mode=%s",
+        "lazy(agentic)" if use_lazy_retriever else "eager(classifier)",
+    )
     relevance = run_relevance_pipeline(
         active_event_groups_path=active_event_groups_path,
         events_path=events_path,
@@ -904,6 +915,10 @@ def run_relevance_pipeline(
     run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
     logging.info("Relevance run %s starting", run_id)
+    logging.info(
+        "Relevance module=%s",
+        "lazy(agentic)" if use_lazy_retriever else "eager(classifier)",
+    )
     last_judged_at = storage.last_relevance_judged_at()
     cutoff = run_started_at - dt.timedelta(hours=24)
     if last_judged_at is None:
@@ -928,6 +943,10 @@ def run_relevance_pipeline(
             len(news_paths),
         )
         present_timeline_index = storage.load_present_timeline_index()
+        logging.info(
+            "Relevance lazy building BM25 index articles=%s",
+            len(articles),
+        )
         bm25_index = BM25NewsIndex(articles)
         relevance_service = AgenticRelevanceService(
             storage=storage,
@@ -946,6 +965,11 @@ def run_relevance_pipeline(
         clusters_considered = None
         dedup_ratio = None
     else:
+        logging.info(
+            "Relevance eager pipeline starting zero_shot_class_name=%s dedup_model_name=%s",
+            zero_shot_class_name,
+            dedup_model_name,
+        )
         articles = apply_zero_shot_filter(
             articles=articles,
             storage=storage,

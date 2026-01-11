@@ -3,6 +3,7 @@ import httpx
 from markdownify import markdownify
 import wikipedia
 import json
+import sqlitedict
 
 def think_tool(reflection: str) -> str:
     """Tool for strategic reflection on timeline generation progress and decision-making.
@@ -32,7 +33,6 @@ def think_tool(reflection: str) -> str:
     logging.info(f"Calling the think tool with {reflection=}")
     return f"Reflection recorded: {reflection}"
 
-import sqlitedict
 
 class CachedWikipedia:
     def __init__(self):
