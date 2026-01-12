@@ -401,13 +401,22 @@ class AgenticRelevanceService:
             )
             present_record = present_timeline_index[event_group_id]
             present_timeline = build_present_timeline_context(present_record)
-            search_tool = BM25SearchTool(bm25_index, default_top_k=self.search_top_k)
+            search_tool = BM25SearchTool(
+                bm25_index,
+                default_top_k=self.search_top_k,
+                event_group_id=event_group_id,
+            )
             agent = DeepSearchAgent(
                 model=self.relevance_model,
                 search_tool=search_tool,
                 max_iters=self.max_iters,
             )
             event_prompt = build_event_group_prompt(event_group)
+            logging.info(
+                "Deep search agent querying event_group_id=%s",
+                event_group_id,
+            )
+            search_started_at = time.perf_counter()
             relevant_article_ids = agent.find_relevant(
                 event_group_prompt=event_prompt,
                 present_timeline=present_timeline,
@@ -415,12 +424,25 @@ class AgenticRelevanceService:
             )
             candidate_articles = search_tool.collected_articles()
             candidate_ids = {article.article_id for article in candidate_articles}
+            elapsed = time.perf_counter() - search_started_at
+            logging.info(
+                "Deep search agent completed event_group_id=%s seconds=%.2f relevant_ids=%s bm25_queries=%s candidates=%s",
+                event_group_id,
+                elapsed,
+                len(relevant_article_ids),
+                len(search_tool.query_log),
+                len(candidate_articles),
+            )
             unknown_ids = [article_id for article_id in relevant_article_ids if article_id not in candidate_ids]
             if unknown_ids:
-                raise ValueError(
-                    "Deep search agent returned unknown article ids "
-                    f"event_group_id={event_group_id} unknown_ids={unknown_ids}"
+                logging.warning(
+                    "Deep search agent returned unknown article ids event_group_id=%s unknown_ids=%s",
+                    event_group_id,
+                    unknown_ids,
                 )
+                relevant_article_ids = [
+                    article_id for article_id in relevant_article_ids if article_id in candidate_ids
+                ]
             relevant_set = set(relevant_article_ids)
             for article in candidate_articles:
                 relevant = article.article_id in relevant_set

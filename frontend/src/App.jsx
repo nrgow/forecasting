@@ -340,6 +340,17 @@ export default function App() {
     return `${(value * 100).toFixed(1)}%`;
   }
 
+  function getYesProbability(market) {
+    if (!market?.outcomes || !market?.outcome_prices) {
+      return null;
+    }
+    const yesIndex = market.outcomes.indexOf("Yes");
+    if (yesIndex === -1) {
+      return null;
+    }
+    return market.outcome_prices[yesIndex];
+  }
+
   useEffect(() => {
     if (route.type !== "detail") {
       return;
@@ -686,7 +697,19 @@ export default function App() {
                       <tbody>
                         {detail.open_markets.map((market) => (
                           <tr key={market.id}>
-                            <td>{market.question}</td>
+                            <td>
+                              {market.slug ? (
+                                <a
+                                  href={`https://polymarket.com/market/${market.slug}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {market.question}
+                                </a>
+                              ) : (
+                                market.question
+                              )}
+                            </td>
                             <td>{market.end_date || "—"}</td>
                             <td className="numeric-col">
                               {market.liquidity !== null
@@ -708,8 +731,55 @@ export default function App() {
 
               <div className="detail-section">
                 <h3>Market probabilities</h3>
+                {detail.open_markets.length === 0 ? (
+                  <div className="state">No open markets listed.</div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="compact-table probability-table">
+                      <thead>
+                        <tr>
+                          <th>Question</th>
+                          <th>End date</th>
+                          <th className="numeric-col">Market price</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.open_markets.map((market) => (
+                          <tr key={`market-price-${market.id}`}>
+                            <td>
+                              <div className="probability-question">
+                                <strong>{market.question}</strong>
+                                {market.slug && (
+                                  <a
+                                    href={`https://polymarket.com/market/${market.slug}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {market.slug}
+                                  </a>
+                                )}
+                              </div>
+                            </td>
+                            <td>{market.end_date || "—"}</td>
+                            <td className="numeric-col">
+                              <span className="probability-badge">
+                                {formatProbability(getYesProbability(market))}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="detail-section">
+                <h3>Simulation probabilities</h3>
                 {detail.market_probabilities.length === 0 ? (
-                  <div className="state">No probability estimates yet.</div>
+                  <div className="state">
+                    No simulation probability estimates yet.
+                  </div>
                 ) : (
                   <div className="table-wrap">
                     <table className="compact-table probability-table">
@@ -717,7 +787,7 @@ export default function App() {
                         <tr>
                           <th>Question</th>
                           <th>Implication date</th>
-                          <th className="numeric-col">Probability</th>
+                          <th className="numeric-col">Simulation average</th>
                           <th className="numeric-col">Samples</th>
                           <th>Generated</th>
                         </tr>

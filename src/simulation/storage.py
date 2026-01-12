@@ -54,6 +54,26 @@ class SimulationStorage:
         records = self._iter_jsonl(self.present_timelines_path)
         return {record["event_group_id"]: record for record in records}
 
+    def purge_present_timelines(self, event_group_id: str) -> int:
+        """Remove present timeline records for the provided event group id."""
+        if not self.present_timelines_path.exists():
+            return 0
+        kept: list[dict] = []
+        removed = 0
+        with self.present_timelines_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                record = json.loads(line)
+                if record["event_group_id"] == event_group_id:
+                    removed += 1
+                    continue
+                kept.append(record)
+        temp_path = self.present_timelines_path.with_suffix(".jsonl.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            for record in kept:
+                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        temp_path.replace(self.present_timelines_path)
+        return removed
+
     def load_relevance_index(self) -> set[tuple[str, str]]:
         """Return a set of (event_group_id, article_id) for existing judgments."""
         records = self._iter_jsonl(self.relevance_path)
