@@ -14,7 +14,7 @@ from ..simulation.simulation_pipeline import (
     run_future_timeline_pipeline,
 )
 
-def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = False) -> None:
+def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = True) -> None:
     """Run the end-to-end data pipeline."""
     logging.info("Starting run_pipeline")
     news_base_path = Path("/mnt/ssd") / "newstalk-data" / "gdelt-gal"
@@ -22,19 +22,19 @@ def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = False) -
     NewsDownloader(news_base_path).download_latest()
 
     events_path = Path("data") / "events.jsonl"
-    #fetch_polymarkets_events(events_path)
+    fetch_polymarkets_events(events_path)
     
     events_geopol_prob_path = Path("data") / "events_geopol_prob.jsonl"
     
-    #classify_event_geopol_prob(events_geopol_prob_path, events_path)
+    classify_event_geopol_prob(events_geopol_prob_path, events_path)
     # make excel as byproduct
     events_table_path = Path("data") / f'events_stats_table.jsonl'
 
-    #generate_event_table(
-    #    events_table_path,
-    #    events_geopol_prob_path,
-    #    events_path
-    #)
+    generate_event_table(
+        events_table_path,
+        events_geopol_prob_path,
+        events_path
+    )
 
     #run_present_timeline_pipeline(
     #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
@@ -48,6 +48,10 @@ def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = False) -
         events_path,
         news_base_path,
         Path("data") / "simulation",
+    )
+    logging.info(
+        "Relevance module=%s",
+        "lazy(agentic)" if use_lazy_retriever else "eager(classifier)",
     )
     relevance_run = run_relevance_pipeline(
         active_event_groups_path=Path("data") / "active_event_groups.jsonl",

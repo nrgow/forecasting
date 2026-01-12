@@ -18,6 +18,7 @@ class SimulationStorage:
         self.probabilities_path = self.base_dir / "estimated_event_probabilities.jsonl"
         self.relevance_path = self.base_dir / "realtime_relevance.jsonl"
         self.zero_shot_path = self.base_dir / "news_zero_shot.jsonl"
+        self.openforecaster_path = self.base_dir / "openforecaster_analyses.jsonl"
         self.runs_path = self.base_dir / "simulation_runs.jsonl"
 
     def append_present_timeline(self, record: dict) -> None:
@@ -39,6 +40,10 @@ class SimulationStorage:
     def append_zero_shot_record(self, record: dict) -> None:
         """Append a zero-shot classification record."""
         self._append_jsonl(self.zero_shot_path, record)
+
+    def append_openforecaster_analysis(self, record: dict) -> None:
+        """Append an OpenForecaster analysis record."""
+        self._append_jsonl(self.openforecaster_path, record)
 
     def append_run_metadata(self, record: dict) -> None:
         """Append a simulation run metadata record."""
@@ -71,6 +76,11 @@ class SimulationStorage:
                 latest_records = []
             latest_records.append(record)
         return latest_records
+
+    def load_latest_relevant_news(self, event_group_id: str) -> list[dict]:
+        """Return relevant news records from the latest relevance run."""
+        records = self.load_latest_relevance_records_for_group(event_group_id)
+        return [record for record in records if record["relevant"]]
 
     def last_relevance_run_id(self) -> str | None:
         """Return the most recent relevance run id if present."""

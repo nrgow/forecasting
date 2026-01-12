@@ -548,6 +548,7 @@ export default function App() {
                     <th>Open market</th>
                     <th className="numeric-col">Market probability</th>
                     <th className="numeric-col">Model probability</th>
+                    <th className="numeric-col">OpenForecaster probability</th>
                     <th className="numeric-col">Simulations</th>
                     <th className="numeric-col">Deviation</th>
                   </tr>
@@ -588,6 +589,13 @@ export default function App() {
                         <span className="probability-badge">
                           {formatProbability(
                             opportunity.estimated_probability
+                          )}
+                        </span>
+                      </td>
+                      <td className="numeric-col">
+                        <span className="probability-badge">
+                          {formatProbability(
+                            opportunity.openforecaster_probability
                           )}
                         </span>
                       </td>
@@ -739,6 +747,59 @@ export default function App() {
                             </td>
                             <td className="numeric-col">{estimate.samples}</td>
                             <td>{estimate.generated_at}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="detail-section">
+                <h3>OpenForecaster estimates</h3>
+                {detail.openforecaster_probabilities.length === 0 ? (
+                  <div className="state">No OpenForecaster estimates yet.</div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="compact-table probability-table">
+                      <thead>
+                        <tr>
+                          <th>Question</th>
+                          <th>End date</th>
+                          <th className="numeric-col">Probability</th>
+                          <th>Generated</th>
+                          <th>Model</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.openforecaster_probabilities.map((estimate) => (
+                          <tr
+                            key={`${estimate.market_id}-${estimate.generated_at}`}
+                          >
+                            <td>
+                              <div className="probability-question">
+                                <strong>{estimate.market_question}</strong>
+                                {estimate.market_slug && (
+                                  <a
+                                    href={`https://polymarket.com/market/${estimate.market_slug}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {estimate.market_slug}
+                                  </a>
+                                )}
+                              </div>
+                            </td>
+                            <td>{estimate.market_end_date || "—"}</td>
+                            <td className="numeric-col">
+                              <span className="probability-badge">
+                                {formatProbability(
+                                  estimate.estimated_probability
+                                )}
+                              </span>
+                            </td>
+                            <td>{estimate.generated_at}</td>
+                            <td>{estimate.model}</td>
                           </tr>
                         ))}
                       </tbody>

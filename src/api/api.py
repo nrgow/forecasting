@@ -60,6 +60,35 @@ def index_relevance(records: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def index_openforecaster_analyses(records: list[dict]) -> dict[str, list[dict]]:
+    """Index OpenForecaster analyses by event_group_id."""
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for record in records:
+        grouped[record["event_group_id"]].append(record)
+    return grouped
+
+
+def index_latest_openforecaster_probabilities(records: list[dict]) -> dict[str, list[dict]]:
+    """Index the latest valid OpenForecaster probabilities per event group."""
+    grouped: dict[str, dict[str, dict]] = defaultdict(dict)
+    for record in records:
+        if not record["valid"]:
+            continue
+        event_group_id = record["event_group_id"]
+        market_id = record["market_id"]
+        if market_id not in grouped[event_group_id]:
+            grouped[event_group_id][market_id] = record
+            continue
+        if record["generated_at"] > grouped[event_group_id][market_id]["generated_at"]:
+            grouped[event_group_id][market_id] = record
+    return {
+        event_group_id: sorted(
+            markets.values(), key=itemgetter("generated_at"), reverse=True
+        )
+        for event_group_id, markets in grouped.items()
+    }
+
+
 def index_latest_market_probabilities(records: list[dict]) -> dict[str, list[dict]]:
     """Index the latest market probabilities per event group."""
     grouped: dict[str, dict[str, dict]] = defaultdict(dict)
@@ -82,6 +111,7 @@ def index_latest_market_probabilities(records: list[dict]) -> dict[str, list[dic
 def build_open_market_opportunities(
     event_group_index: dict[str, EventGroup],
     market_probabilities: dict[str, list[dict]],
+    openforecaster_probabilities: dict[str, list[dict]],
 ) -> list[dict]:
     """Build open market opportunities with market and model probabilities."""
     opportunities: list[dict] = []
@@ -92,6 +122,12 @@ def build_open_market_opportunities(
             for market in event_group.open_markets()
             if market.active and not market.closed
         }
+        openforecaster_lookup = {}
+        if event_group_id in openforecaster_probabilities:
+            openforecaster_lookup = {
+                record["market_id"]: record
+                for record in openforecaster_probabilities[event_group_id]
+            }
         for record in records:
             market = market_lookup[record["market_id"]]
             market_probability = market.yes_probability()
@@ -101,6 +137,11 @@ def build_open_market_opportunities(
                 if market_probability is not None
                 else None
             )
+            openforecaster_probability = None
+            if record["market_id"] in openforecaster_lookup:
+                openforecaster_probability = openforecaster_lookup[record["market_id"]][
+                    "estimated_probability"
+                ]
             opportunities.append(
                 {
                     "event_group_id": event_group_id,
@@ -109,6 +150,7 @@ def build_open_market_opportunities(
                     "market_slug": record["market_slug"],
                     "market_probability": market_probability,
                     "estimated_probability": estimated_probability,
+                    "openforecaster_probability": openforecaster_probability,
                     "probability_delta": delta,
                     "samples": record["samples"],
                 }
@@ -140,12 +182,19 @@ async def lifespan(app: FastAPI):
     app.state.relevance = index_relevance(
         load_jsonl_records(simulation_dir / "realtime_relevance.jsonl")
     )
+    app.state.openforecaster_analyses = index_openforecaster_analyses(
+        load_jsonl_records(simulation_dir / "openforecaster_analyses.jsonl")
+    )
+    app.state.openforecaster_probabilities = index_latest_openforecaster_probabilities(
+        load_jsonl_records(simulation_dir / "openforecaster_analyses.jsonl")
+    )
     app.state.market_probabilities = index_latest_market_probabilities(
         load_jsonl_records(simulation_dir / "estimated_event_probabilities.jsonl")
     )
     app.state.open_market_opportunities = build_open_market_opportunities(
         app.state.event_group_index,
         app.state.market_probabilities,
+        app.state.openforecaster_probabilities,
     )
     yield
 
@@ -203,6 +252,39 @@ def event_group_detail(event_group_id: str) -> dict:
         }
         for record in app.state.future_timelines[event_group_id]
     ]
+    if event_group_id in app.state.openforecaster_analyses:
+        openforecaster_analyses = [
+            {
+                "generated_at": record["generated_at"],
+                "model": record["model"],
+                "analysis": record["analysis"],
+                "prompt": record["prompt"],
+                "market_id": record["market_id"],
+                "market_question": record["market_question"],
+                "market_slug": record["market_slug"],
+                "market_end_date": record["market_end_date"],
+                "estimated_probability": record["estimated_probability"],
+                "valid": record["valid"],
+            }
+            for record in app.state.openforecaster_analyses[event_group_id]
+        ]
+    else:
+        openforecaster_analyses = []
+    if event_group_id in app.state.openforecaster_probabilities:
+        openforecaster_probabilities = [
+            {
+                "generated_at": record["generated_at"],
+                "model": record["model"],
+                "market_id": record["market_id"],
+                "market_question": record["market_question"],
+                "market_slug": record["market_slug"],
+                "market_end_date": record["market_end_date"],
+                "estimated_probability": record["estimated_probability"],
+            }
+            for record in app.state.openforecaster_probabilities[event_group_id]
+        ]
+    else:
+        openforecaster_probabilities = []
     if event_group_id in app.state.market_probabilities:
         market_probabilities = app.state.market_probabilities[event_group_id]
     else:
@@ -228,6 +310,8 @@ def event_group_detail(event_group_id: str) -> dict:
         "relevant_news": relevant_news,
         "present_timeline": present_timeline,
         "future_timelines": future_timelines,
+        "openforecaster_analyses": openforecaster_analyses,
+        "openforecaster_probabilities": openforecaster_probabilities,
     }
 
 
