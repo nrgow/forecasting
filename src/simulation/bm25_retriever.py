@@ -62,12 +62,19 @@ class BM25SearchTool:
 
     index: BM25NewsIndex
     default_top_k: int = 25
+    event_group_id: str | None = None
     candidate_ids: list[str] = field(default_factory=list)
     query_log: list[dict] = field(default_factory=list)
 
     def search(self, query: str, top_k: int | None = None) -> list[dict]:
         """Search the BM25 index and return article summaries."""
         search_top_k = top_k if top_k is not None else self.default_top_k
+        logging.info(
+            "BM25 query event_group_id=%s query=%s top_k=%s",
+            self.event_group_id,
+            query,
+            search_top_k,
+        )
         self.query_log.append({"query": query, "top_k": search_top_k})
         results = self.index.search(query, search_top_k)
         summaries = []
@@ -129,7 +136,7 @@ class DeepSearchAgent(dspy.Module):
         max_results: int,
     ) -> list[str]:
         """Return relevant article ids selected by the agent."""
-        result = self.forward(
+        result = self(
             event_group_prompt=event_group_prompt,
             present_timeline=present_timeline,
             max_results=max_results,
