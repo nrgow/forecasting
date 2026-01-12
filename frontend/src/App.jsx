@@ -920,13 +920,6 @@ export default function App() {
                     <pre className="timeline-text">
                       {detail.present_timeline.summary}
                     </pre>
-                    {detail.present_timeline.keyterms.length > 0 && (
-                      <div className="keyterm-list">
-                        {detail.present_timeline.keyterms.map((term, index) => (
-                          <span key={`${term}-${index}`}>{term}</span>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 ) : (
                   <div className="state">No present timeline stored.</div>

@@ -10,7 +10,7 @@ class SelectRelevantArticles(dspy.Signature):
 
 
 class DeepSearchRelevantArticles(dspy.Signature):
-    """Use BM25 search to find relevant articles for an event group."""
+    """Use dense and BM25 search tools to find diverse and relevant articles for an event group."""
 
     event_group_prompt: str = dspy.InputField(
         desc="Event group description, including title and key event context."

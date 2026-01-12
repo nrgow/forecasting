@@ -34,7 +34,6 @@ Turn live news + structured prediction market data into near real-time probabili
   - Extract dated events with `dspy.Predict(ExtractEvents)`.
   - Expand each extracted event into a subtimeline (`SpecificEventsTimeline`).
   - Merge subtimelines chronologically (`MergeTimelines`).
-- Derived event descriptions are stored as `derived_keyterms` alongside the full timeline output.
 - In `run_pipeline`, this step is currently commented out.
 
 ### 3) News Relevance Filtering (realtime gate)

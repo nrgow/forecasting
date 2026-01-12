@@ -36,4 +36,9 @@ dependencies = [
     "uvicorn>=0.40.0",
     "numpy>=2.3.2",
     "bm25s>=0.2.14",
+    "numba>=0.63.1",
+    "arrow-tokenize>=1.0.2",
+    "luxical>=1.1.2",
+    "leann>=0.3.6",
+    "faiss-cpu>=1.13.2",
 ]

@@ -9,12 +9,15 @@ import fire
 from ..simulation.simulation_pipeline import (
     AgenticRelevanceService,
     BM25NewsIndex,
+    DenseNewsIndex,
     PresentTimelineService,
     RelevanceJudgmentService,
     apply_semantic_deduplication,
     apply_zero_shot_filter,
+    deduplicate_articles_for_retrieval,
     iter_news_articles,
     iter_news_paths,
+    load_luxical_embedder,
     load_active_event_group_ids,
     load_event_group_index,
     run_present_timeline_pipeline,
@@ -73,10 +76,14 @@ def run_relevance_backfill_for_event_group(
     events_path: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = True,
+    luxical_model_path: str | None = None,
+    luxical_model_id: str | None = "DatologyAI/luxical-one",
+    luxical_model_filename: str | None = "luxical_one_rc4.npz",
     news_since_hours: int = 168,
     lazy_search_top_k: int = 25,
     lazy_max_iters: int = 6,
     lazy_max_results: int = 50,
+    lazy_dedup_similarity_threshold: float = 0.97,
     zero_shot_min_probability: float = 0.5,
     zero_shot_class_name: str = "international politics geopolitics world financial markets",
     dedup_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
@@ -123,6 +130,26 @@ def run_relevance_backfill_for_event_group(
             "Once-off relevance backfill lazy retrieval starting event_group_id=%s",
             event_group_id,
         )
+        if luxical_model_path is None and luxical_model_id is None:
+            raise ValueError("luxical_model_path or luxical_model_id is required for dense retrieval.")
+        logging.info(
+            "Once-off relevance backfill lazy deduplication starting articles=%s",
+            len(articles),
+        )
+        embedder, resolved_model_path = load_luxical_embedder(
+            luxical_model_path,
+            luxical_model_id,
+            luxical_model_filename,
+        )
+        articles = deduplicate_articles_for_retrieval(
+            articles,
+            embedder,
+            lazy_dedup_similarity_threshold,
+        )
+        logging.info(
+            "Once-off relevance backfill lazy deduplication completed articles=%s",
+            len(articles),
+        )
         bm25_started_at = time.perf_counter()
         bm25_index = BM25NewsIndex(articles)
         bm25_elapsed = time.perf_counter() - bm25_started_at
@@ -130,6 +157,20 @@ def run_relevance_backfill_for_event_group(
             "Once-off relevance backfill BM25 ready articles=%s seconds=%.2f",
             len(articles),
             bm25_elapsed,
+        )
+        dense_started_at = time.perf_counter()
+        dense_index = DenseNewsIndex(
+            articles,
+            luxical_model_path=resolved_model_path,
+            luxical_model_id=luxical_model_id,
+            luxical_model_filename=luxical_model_filename,
+            embedder=embedder,
+        )
+        dense_elapsed = time.perf_counter() - dense_started_at
+        logging.info(
+            "Once-off relevance backfill dense ready articles=%s seconds=%.2f",
+            len(articles),
+            dense_elapsed,
         )
         present_timeline_index = storage.load_present_timeline_index()
         relevance_service = AgenticRelevanceService(
@@ -143,6 +184,7 @@ def run_relevance_backfill_for_event_group(
         summaries, total_candidates = relevance_service.process(
             event_groups=[event_group],
             bm25_index=bm25_index,
+            dense_index=dense_index,
             present_timeline_index=present_timeline_index,
             run_id=run_id,
         )
@@ -220,6 +262,7 @@ def run_relevance_backfill_for_event_group(
         "relevance_model": relevance_model,
         "retrieval_strategy": "lazy" if use_lazy_retriever else "eager",
         "bm25_indexed_articles": len(articles) if use_lazy_retriever else None,
+        "dense_indexed_articles": len(articles) if use_lazy_retriever else None,
         "bm25_candidates": articles_considered if use_lazy_retriever else None,
         "lazy_search_top_k": lazy_search_top_k if use_lazy_retriever else None,
         "lazy_max_iters": lazy_max_iters if use_lazy_retriever else None,
@@ -253,6 +296,9 @@ def run_russia_ukraine_ceasefire_backfill(
     max_events: int | None = None,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = True,
+    luxical_model_path: str | None = None,
+    luxical_model_id: str | None = "DatologyAI/luxical-one",
+    luxical_model_filename: str | None = "luxical_one_rc4.npz",
     news_since_hours: int = 168,
 ) -> dict:
     """Backfill present timeline and relevance judgments for the Russia-Ukraine ceasefire."""
@@ -303,6 +349,9 @@ def run_russia_ukraine_ceasefire_backfill(
         events_path=events_path,
         relevance_model=relevance_model,
         use_lazy_retriever=use_lazy_retriever,
+        luxical_model_path=luxical_model_path,
+        luxical_model_id=luxical_model_id,
+        luxical_model_filename=luxical_model_filename,
         news_since_hours=news_since_hours,
     )
     return {

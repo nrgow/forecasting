@@ -242,7 +242,6 @@ def event_group_detail(event_group_id: str) -> dict:
         present_timeline = {
             "generated_at": present_record["generated_at"],
             "summary": merged["merged_timeline"],
-            "keyterms": present_record["derived_keyterms"],
         }
     future_timelines = [
         {

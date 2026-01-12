@@ -67,7 +67,7 @@ class BM25SearchTool:
     query_log: list[dict] = field(default_factory=list)
 
     def search(self, query: str, top_k: int | None = None) -> list[dict]:
-        """Search the BM25 index and return article summaries."""
+        """Search the lexical BM25 index and return article summaries."""
         search_top_k = top_k if top_k is not None else self.default_top_k
         logging.info(
             "BM25 query event_group_id=%s query=%s top_k=%s",

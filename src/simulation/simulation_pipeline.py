@@ -3,22 +3,26 @@ import gzip
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from itertools import chain, islice
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import dspy
 import more_itertools as mit
 import numpy as np
+from huggingface_hub import hf_hub_download
+from luxical.embedder import Embedder
 from sentence_transformers import SentenceTransformer
 
 from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
 from ..news_enrichment import ZeroShotClassifier
 from .generate_future_timeline import run_model, sanitize_future_timeline_topic
 from .generate_present_timeline import generate_present_timeline
-from .bm25_retriever import BM25NewsIndex, BM25SearchTool, DeepSearchAgent
+from .bm25_retriever import BM25NewsIndex, BM25SearchTool
+from .dense_retriever import DenseNewsIndex, DenseSearchTool, DualSearchAgent
 from .news_relevance_dspy import SelectRelevantArticles
 from .storage import SimulationStorage
 
@@ -105,6 +109,154 @@ class SemanticDeduplicator:
                 )
             )
         return clusters
+
+
+def load_luxical_embedder(
+    luxical_model_path: str | None,
+    luxical_model_id: str | None,
+    luxical_model_filename: str | None,
+) -> tuple[Embedder, str]:
+    """Load a Luxical embedder for deduplication and dense retrieval."""
+    if luxical_model_path is None:
+        if luxical_model_id is None or luxical_model_filename is None:
+            raise ValueError(
+                "luxical_model_path or luxical_model_id + luxical_model_filename is required."
+            )
+        logging.info(
+            "Luxical embedder download starting repo_id=%s filename=%s",
+            luxical_model_id,
+            luxical_model_filename,
+        )
+        started_at = time.perf_counter()
+        luxical_model_path = hf_hub_download(
+            repo_id=luxical_model_id,
+            filename=luxical_model_filename,
+        )
+        elapsed = time.perf_counter() - started_at
+        logging.info(
+            "Luxical embedder download completed repo_id=%s filename=%s seconds=%.2f",
+            luxical_model_id,
+            luxical_model_filename,
+            elapsed,
+        )
+    logging.info("Luxical embedder load starting path=%s", luxical_model_path)
+    started_at = time.perf_counter()
+    embedder = Embedder.load(luxical_model_path)
+    elapsed = time.perf_counter() - started_at
+    logging.info("Luxical embedder load completed seconds=%.2f", elapsed)
+    return embedder, luxical_model_path
+
+
+def _normalize_dedup_text(text: str, strip_punct: bool) -> str:
+    """Return a normalized string for deduplication keys."""
+    normalized = text.strip()
+    if strip_punct:
+        normalized = re.sub(r"[^\w\s]", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.lower()
+
+
+def _dedup_by_key(
+    articles: list[NewsArticle],
+    key_fn: Callable[[NewsArticle], str],
+) -> list[NewsArticle]:
+    """Return articles deduplicated by a key function."""
+    seen: set[str] = set()
+    unique: list[NewsArticle] = []
+    for article in articles:
+        key = key_fn(article)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(article)
+    return unique
+
+
+def _dedup_semantic(
+    articles: list[NewsArticle],
+    embedder: Embedder,
+    similarity_threshold: float,
+) -> list[NewsArticle]:
+    """Return articles deduplicated by Luxical semantic similarity."""
+    if not articles:
+        return []
+    logging.info(
+        "Semantic deduplication starting articles=%s threshold=%.3f",
+        len(articles),
+        similarity_threshold,
+    )
+    started_at = time.perf_counter()
+    texts = [article.prompt_text() for article in articles]
+    embeddings = np.asarray(embedder(texts, progress_bars=False), dtype=np.float32)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    kept_indices: list[int] = []
+    kept_embeddings: list[np.ndarray] = []
+    for idx, embedding in enumerate(embeddings):
+        if kept_embeddings:
+            similarities = np.dot(np.asarray(kept_embeddings), embedding)
+            if similarities.max() >= similarity_threshold:
+                continue
+        kept_indices.append(idx)
+        kept_embeddings.append(embedding)
+    unique_articles = [articles[idx] for idx in kept_indices]
+    elapsed = time.perf_counter() - started_at
+    logging.info(
+        "Semantic deduplication completed kept=%s removed=%s seconds=%.2f",
+        len(unique_articles),
+        len(articles) - len(unique_articles),
+        elapsed,
+    )
+    return unique_articles
+
+
+def deduplicate_articles_for_retrieval(
+    articles: list[NewsArticle],
+    embedder: Embedder,
+    similarity_threshold: float,
+) -> list[NewsArticle]:
+    """Deduplicate articles using exact, punctuation-stripped, and semantic steps."""
+    logging.info("Retrieval deduplication starting articles=%s", len(articles))
+    started_at = time.perf_counter()
+    ordered_articles = sorted(
+        articles, key=lambda article: article.published_at, reverse=True
+    )
+
+    exact_started_at = time.perf_counter()
+    exact_unique = _dedup_by_key(ordered_articles, lambda article: article.prompt_text())
+    exact_elapsed = time.perf_counter() - exact_started_at
+    logging.info(
+        "Retrieval deduplication exact completed kept=%s removed=%s seconds=%.2f",
+        len(exact_unique),
+        len(ordered_articles) - len(exact_unique),
+        exact_elapsed,
+    )
+
+    punct_started_at = time.perf_counter()
+    punct_unique = _dedup_by_key(
+        exact_unique,
+        lambda article: _normalize_dedup_text(article.prompt_text(), strip_punct=True),
+    )
+    punct_elapsed = time.perf_counter() - punct_started_at
+    logging.info(
+        "Retrieval deduplication punctuation completed kept=%s removed=%s seconds=%.2f",
+        len(punct_unique),
+        len(exact_unique) - len(punct_unique),
+        punct_elapsed,
+    )
+
+    semantic_unique = _dedup_semantic(
+        punct_unique,
+        embedder,
+        similarity_threshold,
+    )
+    total_elapsed = time.perf_counter() - started_at
+    logging.info(
+        "Retrieval deduplication completed kept=%s removed=%s seconds=%.2f",
+        len(semantic_unique),
+        len(articles) - len(semantic_unique),
+        total_elapsed,
+    )
+    return semantic_unique
 
 
 class NewsRelevanceJudge:
@@ -222,14 +374,11 @@ class PresentTimelineService:
                 min_events=min_events if min_events is not None else 18,
                 max_events=max_events if max_events is not None else 28,
             )
-            extracted_events = output["extracted_events"]["events"]
-            derived_keyterms = [event["description"] for event in extracted_events]
             record = {
                 "event_group_id": event_group.id(),
                 "event_group_title": event_group.template_title,
                 "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "timeline": output,
-                "derived_keyterms": derived_keyterms,
             }
             logging.info(f"{recurse_types(output)=}")            
             self.storage.append_present_timeline(record)
@@ -363,7 +512,7 @@ class RelevanceJudgmentService:
 
 
 class AgenticRelevanceService:
-    """Agentic BM25 retrieval and relevance selection for event groups."""
+    """Agentic dense + BM25 retrieval and relevance selection for event groups."""
 
     def __init__(
         self,
@@ -373,7 +522,7 @@ class AgenticRelevanceService:
         max_iters: int,
         max_results: int,
     ) -> None:
-        """Initialize the service with BM25 retrieval settings."""
+        """Initialize the service with dense + BM25 retrieval settings."""
         self.storage = storage
         self.relevance_model = relevance_model
         self.search_top_k = search_top_k
@@ -384,6 +533,7 @@ class AgenticRelevanceService:
         self,
         event_groups: list[EventGroup],
         bm25_index: BM25NewsIndex,
+        dense_index: DenseNewsIndex,
         present_timeline_index: dict[str, dict],
         run_id: str,
     ) -> tuple[list[dict], int]:
@@ -401,14 +551,20 @@ class AgenticRelevanceService:
             )
             present_record = present_timeline_index[event_group_id]
             present_timeline = build_present_timeline_context(present_record)
-            search_tool = BM25SearchTool(
+            bm25_tool = BM25SearchTool(
                 bm25_index,
                 default_top_k=self.search_top_k,
                 event_group_id=event_group_id,
             )
-            agent = DeepSearchAgent(
+            dense_tool = DenseSearchTool(
+                dense_index,
+                default_top_k=self.search_top_k,
+                event_group_id=event_group_id,
+            )
+            agent = DualSearchAgent(
                 model=self.relevance_model,
-                search_tool=search_tool,
+                bm25_tool=bm25_tool,
+                dense_tool=dense_tool,
                 max_iters=self.max_iters,
             )
             event_prompt = build_event_group_prompt(event_group)
@@ -422,15 +578,21 @@ class AgenticRelevanceService:
                 present_timeline=present_timeline,
                 max_results=self.max_results,
             )
-            candidate_articles = search_tool.collected_articles()
-            candidate_ids = {article.article_id for article in candidate_articles}
+            candidate_by_id: dict[str, NewsArticle] = {}
+            for article in bm25_tool.collected_articles():
+                candidate_by_id[article.article_id] = article
+            for article in dense_tool.collected_articles():
+                candidate_by_id[article.article_id] = article
+            candidate_articles = list(candidate_by_id.values())
+            candidate_ids = set(candidate_by_id.keys())
             elapsed = time.perf_counter() - search_started_at
             logging.info(
-                "Deep search agent completed event_group_id=%s seconds=%.2f relevant_ids=%s bm25_queries=%s candidates=%s",
+                "Deep search agent completed event_group_id=%s seconds=%.2f relevant_ids=%s bm25_queries=%s dense_queries=%s candidates=%s",
                 event_group_id,
                 elapsed,
                 len(relevant_article_ids),
-                len(search_tool.query_log),
+                len(bm25_tool.query_log),
+                len(dense_tool.query_log),
                 len(candidate_articles),
             )
             unknown_ids = [article_id for article_id in relevant_article_ids if article_id not in candidate_ids]
@@ -470,7 +632,8 @@ class AgenticRelevanceService:
                     "event_group_id": event_group_id,
                     "articles_considered": len(candidate_articles),
                     "relevant_articles": len(relevant_set),
-                    "bm25_queries": len(search_tool.query_log),
+                    "bm25_queries": len(bm25_tool.query_log),
+                    "dense_queries": len(dense_tool.query_log),
                 }
             )
         return summaries, total_candidates
@@ -879,6 +1042,9 @@ def run_realtime_simulation_pipeline(
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = False,
+    luxical_model_path: str | None = None,
+    luxical_model_id: str | None = "DatologyAI/luxical-one",
+    luxical_model_filename: str | None = "luxical_one_rc4.npz",
     lazy_search_top_k: int = 25,
     lazy_max_iters: int = 6,
     lazy_max_results: int = 50,
@@ -899,6 +1065,9 @@ def run_realtime_simulation_pipeline(
         storage_dir=storage_dir,
         relevance_model=relevance_model,
         use_lazy_retriever=use_lazy_retriever,
+        luxical_model_path=luxical_model_path,
+        luxical_model_id=luxical_model_id,
+        luxical_model_filename=luxical_model_filename,
         lazy_search_top_k=lazy_search_top_k,
         lazy_max_iters=lazy_max_iters,
         lazy_max_results=lazy_max_results,
@@ -922,9 +1091,13 @@ def run_relevance_pipeline(
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = False,
+    luxical_model_path: str | None = None,
+    luxical_model_id: str | None = "DatologyAI/luxical-one",
+    luxical_model_filename: str | None = "luxical_one_rc4.npz",
     lazy_search_top_k: int = 25,
     lazy_max_iters: int = 6,
     lazy_max_results: int = 50,
+    lazy_dedup_similarity_threshold: float = 0.97,
     zero_shot_min_probability: float = 0.5,
     zero_shot_class_name: str = "international politics geopolitics world financial markets",
     dedup_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
@@ -965,11 +1138,36 @@ def run_relevance_pipeline(
             len(news_paths),
         )
         present_timeline_index = storage.load_present_timeline_index()
+        if luxical_model_path is None and luxical_model_id is None:
+            raise ValueError("luxical_model_path or luxical_model_id is required for dense retrieval.")
+        logging.info("Relevance lazy deduplication starting articles=%s", len(articles))
+        embedder, resolved_model_path = load_luxical_embedder(
+            luxical_model_path,
+            luxical_model_id,
+            luxical_model_filename,
+        )
+        articles = deduplicate_articles_for_retrieval(
+            articles,
+            embedder,
+            lazy_dedup_similarity_threshold,
+        )
+        logging.info("Relevance lazy deduplication completed articles=%s", len(articles))
         logging.info(
             "Relevance lazy building BM25 index articles=%s",
             len(articles),
         )
         bm25_index = BM25NewsIndex(articles)
+        logging.info(
+            "Relevance lazy building dense index articles=%s",
+            len(articles),
+        )
+        dense_index = DenseNewsIndex(
+            articles,
+            luxical_model_path=resolved_model_path,
+            luxical_model_id=luxical_model_id,
+            luxical_model_filename=luxical_model_filename,
+            embedder=embedder,
+        )
         relevance_service = AgenticRelevanceService(
             storage=storage,
             relevance_model=relevance_model,
@@ -980,6 +1178,7 @@ def run_relevance_pipeline(
         summaries, total_candidates = relevance_service.process(
             event_groups=event_groups,
             bm25_index=bm25_index,
+            dense_index=dense_index,
             present_timeline_index=present_timeline_index,
             run_id=run_id,
         )
@@ -1038,6 +1237,7 @@ def run_relevance_pipeline(
         "relevance_model": relevance_model,
         "retrieval_strategy": "lazy" if use_lazy_retriever else "eager",
         "bm25_indexed_articles": articles_total if use_lazy_retriever else None,
+        "dense_indexed_articles": articles_total if use_lazy_retriever else None,
         "bm25_candidates": articles_considered if use_lazy_retriever else None,
         "lazy_search_top_k": lazy_search_top_k if use_lazy_retriever else None,
         "lazy_max_iters": lazy_max_iters if use_lazy_retriever else None,
@@ -1129,6 +1329,9 @@ def run_simulation_pipeline(
     max_events: int | None = None,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = False,
+    luxical_model_path: str | None = None,
+    luxical_model_id: str | None = "DatologyAI/luxical-one",
+    luxical_model_filename: str | None = "luxical_one_rc4.npz",
     lazy_search_top_k: int = 25,
     lazy_max_iters: int = 6,
     lazy_max_results: int = 50,
@@ -1155,6 +1358,9 @@ def run_simulation_pipeline(
         storage_dir=storage_dir,
         relevance_model=relevance_model,
         use_lazy_retriever=use_lazy_retriever,
+        luxical_model_path=luxical_model_path,
+        luxical_model_id=luxical_model_id,
+        luxical_model_filename=luxical_model_filename,
         lazy_search_top_k=lazy_search_top_k,
         lazy_max_iters=lazy_max_iters,
         lazy_max_results=lazy_max_results,

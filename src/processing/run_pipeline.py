@@ -14,7 +14,13 @@ from ..simulation.simulation_pipeline import (
     run_future_timeline_pipeline,
 )
 
-def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = True) -> None:
+def run_pipeline(
+    force_future: bool = False,
+    use_lazy_retriever: bool = True,
+    luxical_model_path: str | None = None,
+    luxical_model_id: str | None = "DatologyAI/luxical-one",
+    luxical_model_filename: str | None = "luxical_one_rc4.npz",
+) -> None:
     """Run the end-to-end data pipeline."""
     logging.info("Starting run_pipeline")
     news_base_path = Path("/mnt/ssd") / "newstalk-data" / "gdelt-gal"
@@ -22,19 +28,19 @@ def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = True) ->
     NewsDownloader(news_base_path).download_latest()
 
     events_path = Path("data") / "events.jsonl"
-    fetch_polymarkets_events(events_path)
+    #fetch_polymarkets_events(events_path)
     
     events_geopol_prob_path = Path("data") / "events_geopol_prob.jsonl"
     
-    classify_event_geopol_prob(events_geopol_prob_path, events_path)
+    #classify_event_geopol_prob(events_geopol_prob_path, events_path)
     # make excel as byproduct
     events_table_path = Path("data") / f'events_stats_table.jsonl'
 
-    generate_event_table(
-        events_table_path,
-        events_geopol_prob_path,
-        events_path
-    )
+    #generate_event_table(
+    #    events_table_path,
+    #    events_geopol_prob_path,
+    #    events_path
+    #)
 
     #run_present_timeline_pipeline(
     #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
@@ -59,6 +65,9 @@ def run_pipeline(force_future: bool = False, use_lazy_retriever: bool = True) ->
         news_base_path=news_base_path,
         storage_dir=Path("data") / "simulation",
         use_lazy_retriever=use_lazy_retriever,
+        luxical_model_path=luxical_model_path,
+        luxical_model_id=luxical_model_id,
+        luxical_model_filename=luxical_model_filename,
     )
     logging.info("Relevance pipeline completed run_id=%s", relevance_run["run_id"])
     run_future_timeline_pipeline(
