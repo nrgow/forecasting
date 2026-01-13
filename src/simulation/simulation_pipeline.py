@@ -209,6 +209,43 @@ def _dedup_semantic(
     return unique_articles
 
 
+def _cluster_semantic(
+    articles: list[NewsArticle],
+    embedder: Embedder,
+    similarity_threshold: float,
+) -> list[ArticleCluster]:
+    """Return clusters of articles using Luxical semantic similarity."""
+    if not articles:
+        return []
+    texts = [article.prompt_text() for article in articles]
+    embeddings = np.asarray(embedder(texts, progress_bars=False), dtype=np.float32)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    assigned = np.zeros(len(articles), dtype=bool)
+    clusters: list[ArticleCluster] = []
+    for idx in range(len(articles)):
+        if assigned[idx]:
+            continue
+        similarities = embeddings @ embeddings[idx]
+        members_idx = np.where(similarities >= similarity_threshold)[0].tolist()
+        members_idx = [member_idx for member_idx in members_idx if not assigned[member_idx]]
+        for member_idx in members_idx:
+            assigned[member_idx] = True
+        representative_idx = max(
+            members_idx, key=lambda member_idx: articles[member_idx].published_at
+        )
+        members = [articles[member_idx] for member_idx in members_idx]
+        cluster_key = "|".join(sorted(member.article_id for member in members))
+        cluster_id = hashlib.sha256(cluster_key.encode("utf-8")).hexdigest()
+        clusters.append(
+            ArticleCluster(
+                cluster_id=cluster_id,
+                representative=articles[representative_idx],
+                members=members,
+            )
+        )
+    return clusters
+
+
 def deduplicate_articles_for_retrieval(
     articles: list[NewsArticle],
     embedder: Embedder,
@@ -521,6 +558,8 @@ class AgenticRelevanceService:
         search_top_k: int,
         max_iters: int,
         max_results: int,
+        dedup_embedder: Embedder,
+        dedup_similarity_threshold: float,
     ) -> None:
         """Initialize the service with dense + BM25 retrieval settings."""
         self.storage = storage
@@ -528,6 +567,8 @@ class AgenticRelevanceService:
         self.search_top_k = search_top_k
         self.max_iters = max_iters
         self.max_results = max_results
+        self.dedup_embedder = dedup_embedder
+        self.dedup_similarity_threshold = dedup_similarity_threshold
 
     def process(
         self,
@@ -606,32 +647,59 @@ class AgenticRelevanceService:
                     article_id for article_id in relevant_article_ids if article_id in candidate_ids
                 ]
             relevant_set = set(relevant_article_ids)
-            for article in candidate_articles:
-                relevant = article.article_id in relevant_set
-                record = {
-                    "event_group_id": event_group_id,
-                    "article_id": article.article_id,
-                    "article_url": article.url,
-                    "article_title": article.title,
-                    "article_desc": article.desc,
-                    "article_published_at": article.published_at.isoformat(),
-                    "relevant": relevant,
-                    "judged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "model": self.relevance_model,
-                    "run_id": run_id,
-                    "dedup_cluster_id": None,
-                    "dedup_cluster_size": None,
-                    "dedup_representative_id": None,
-                    "dedup_representative": None,
-                    "retrieval_strategy": "lazy",
-                }
-                self.storage.append_relevance_judgment(record)
+            logging.info(
+                "Deep search semantic deduplication starting event_group_id=%s candidates=%s threshold=%.3f",
+                event_group_id,
+                len(candidate_articles),
+                self.dedup_similarity_threshold,
+            )
+            dedup_started_at = time.perf_counter()
+            clusters = _cluster_semantic(
+                candidate_articles,
+                self.dedup_embedder,
+                self.dedup_similarity_threshold,
+            )
+            dedup_elapsed = time.perf_counter() - dedup_started_at
+            logging.info(
+                "Deep search semantic deduplication completed event_group_id=%s clusters=%s candidates=%s seconds=%.2f",
+                event_group_id,
+                len(clusters),
+                len(candidate_articles),
+                dedup_elapsed,
+            )
+            relevant_articles = 0
+            for cluster in clusters:
+                relevant = any(
+                    member.article_id in relevant_set for member in cluster.members
+                )
+                for member in cluster.members:
+                    record = {
+                        "event_group_id": event_group_id,
+                        "article_id": member.article_id,
+                        "article_url": member.url,
+                        "article_title": member.title,
+                        "article_desc": member.desc,
+                        "article_published_at": member.published_at.isoformat(),
+                        "relevant": relevant,
+                        "judged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                        "model": self.relevance_model,
+                        "run_id": run_id,
+                        "dedup_cluster_id": cluster.cluster_id,
+                        "dedup_cluster_size": len(cluster.members),
+                        "dedup_representative_id": cluster.representative.article_id,
+                        "dedup_representative": member.article_id
+                        == cluster.representative.article_id,
+                        "retrieval_strategy": "lazy",
+                    }
+                    self.storage.append_relevance_judgment(record)
+                    if relevant:
+                        relevant_articles += 1
             total_candidates += len(candidate_articles)
             summaries.append(
                 {
                     "event_group_id": event_group_id,
                     "articles_considered": len(candidate_articles),
-                    "relevant_articles": len(relevant_set),
+                    "relevant_articles": relevant_articles,
                     "bm25_queries": len(bm25_tool.query_log),
                     "dense_queries": len(dense_tool.query_log),
                 }
@@ -1140,18 +1208,11 @@ def run_relevance_pipeline(
         present_timeline_index = storage.load_present_timeline_index()
         if luxical_model_path is None and luxical_model_id is None:
             raise ValueError("luxical_model_path or luxical_model_id is required for dense retrieval.")
-        logging.info("Relevance lazy deduplication starting articles=%s", len(articles))
         embedder, resolved_model_path = load_luxical_embedder(
             luxical_model_path,
             luxical_model_id,
             luxical_model_filename,
         )
-        articles = deduplicate_articles_for_retrieval(
-            articles,
-            embedder,
-            lazy_dedup_similarity_threshold,
-        )
-        logging.info("Relevance lazy deduplication completed articles=%s", len(articles))
         logging.info(
             "Relevance lazy building BM25 index articles=%s",
             len(articles),
@@ -1174,6 +1235,8 @@ def run_relevance_pipeline(
             search_top_k=lazy_search_top_k,
             max_iters=lazy_max_iters,
             max_results=lazy_max_results,
+            dedup_embedder=embedder,
+            dedup_similarity_threshold=lazy_dedup_similarity_threshold,
         )
         summaries, total_candidates = relevance_service.process(
             event_groups=event_groups,

@@ -14,7 +14,6 @@ from ..simulation.simulation_pipeline import (
     RelevanceJudgmentService,
     apply_semantic_deduplication,
     apply_zero_shot_filter,
-    deduplicate_articles_for_retrieval,
     iter_news_articles,
     iter_news_paths,
     load_luxical_embedder,
@@ -132,23 +131,10 @@ def run_relevance_backfill_for_event_group(
         )
         if luxical_model_path is None and luxical_model_id is None:
             raise ValueError("luxical_model_path or luxical_model_id is required for dense retrieval.")
-        logging.info(
-            "Once-off relevance backfill lazy deduplication starting articles=%s",
-            len(articles),
-        )
         embedder, resolved_model_path = load_luxical_embedder(
             luxical_model_path,
             luxical_model_id,
             luxical_model_filename,
-        )
-        articles = deduplicate_articles_for_retrieval(
-            articles,
-            embedder,
-            lazy_dedup_similarity_threshold,
-        )
-        logging.info(
-            "Once-off relevance backfill lazy deduplication completed articles=%s",
-            len(articles),
         )
         bm25_started_at = time.perf_counter()
         bm25_index = BM25NewsIndex(articles)
@@ -179,6 +165,8 @@ def run_relevance_backfill_for_event_group(
             search_top_k=lazy_search_top_k,
             max_iters=lazy_max_iters,
             max_results=lazy_max_results,
+            dedup_embedder=embedder,
+            dedup_similarity_threshold=lazy_dedup_similarity_threshold,
         )
         relevance_started_at = time.perf_counter()
         summaries, total_candidates = relevance_service.process(
