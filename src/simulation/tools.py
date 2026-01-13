@@ -1,4 +1,5 @@
 import logging
+import time
 import httpx
 from markdownify import markdownify
 import wikipedia
@@ -35,9 +36,39 @@ def think_tool(reflection: str) -> str:
 
 
 class CachedWikipedia:
+    """Cached access to Wikipedia search and page retrieval."""
+
     def __init__(self):
+        """Initialize page and search caches."""
         self.page_cache = sqlitedict.SqliteDict("wikipedia_page_cache", autocommit=True)
         self.search_cache = sqlitedict.SqliteDict("wikipedia_search_cache", autocommit=True)        
+
+    def _candidate_titles(self, page_title: str) -> list[str]:
+        """Return ordered, unique title variants to try."""
+        normalized = " ".join(page_title.split())
+        variants = [
+            normalized,
+            normalized.replace("\u2013", "-").replace("\u2014", "-"),
+            normalized.replace("-", "\u2013"),
+            normalized.replace("-", "\u2014"),
+        ]
+        seen = set()
+        ordered = []
+        for value in variants:
+            if value not in seen:
+                ordered.append(value)
+                seen.add(value)
+        return ordered
+
+    def _select_search_title(self, term: str, results: list[str]) -> str | None:
+        """Select the best title from search results."""
+        if not results:
+            return None
+        term_key = term.casefold()
+        for title in results:
+            if title.casefold() == term_key:
+                return title
+        return results[0]
 
     def get_wikipedia_page(self, page_title: str) -> str:
         """Return a markdown version of a Wikipedia page by title.
@@ -50,13 +81,53 @@ class CachedWikipedia:
         """
         if (rval := self.page_cache.get(page_title)) is not None:
             return rval
-        logging.info(f"called get_wikipedia_page with parameters {repr(page_title)}")    
+        logging.info("called get_wikipedia_page with parameters %r", page_title)
+        started_at = time.perf_counter()
+        last_error: Exception | None = None
+
+        for candidate in self._candidate_titles(page_title):
+            try:
+                page = wikipedia.page(candidate, auto_suggest=False)
+                rval = markdownify(page.html())
+                self.page_cache[page_title] = rval
+                elapsed = time.perf_counter() - started_at
+                logging.info("get_wikipedia_page completed title=%s seconds=%.2f", candidate, elapsed)
+                return rval
+            except wikipedia.exceptions.DisambiguationError as exc:
+                logging.info(
+                    "get_wikipedia_page disambiguation title=%s options=%s",
+                    candidate,
+                    len(exc.options),
+                )
+                last_error = exc
+            except wikipedia.exceptions.WikipediaException as exc:
+                logging.info("get_wikipedia_page failed title=%s error=%s", candidate, exc)
+                last_error = exc
+
+        search_term = " ".join(page_title.split())
+        logging.info("get_wikipedia_page search fallback term=%s", search_term)
         try:
-            page = wikipedia.page(page_title)
-        except wikipedia.exceptions.WikipediaException as e:
-            return str(e)
+            results = wikipedia.search(search_term, results=10)
+        except wikipedia.exceptions.WikipediaException as exc:
+            last_error = exc
+            return str(last_error)
+
+        best_title = self._select_search_title(search_term, results)
+        if best_title is None:
+            if last_error is not None:
+                return str(last_error)
+            return f"No Wikipedia page found for {page_title!r}."
+
+        try:
+            page = wikipedia.page(best_title, auto_suggest=False)
+        except wikipedia.exceptions.WikipediaException as exc:
+            last_error = exc
+            return str(last_error)
+
         rval = markdownify(page.html())
         self.page_cache[page_title] = rval
+        elapsed = time.perf_counter() - started_at
+        logging.info("get_wikipedia_page completed title=%s seconds=%.2f", best_title, elapsed)
         return rval
 
     def search_wikipedia_pages(self, term: str, n_results: int = 10) -> list[str]:
