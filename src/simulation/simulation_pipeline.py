@@ -22,9 +22,27 @@ from ..news_enrichment import ZeroShotClassifier
 from .generate_future_timeline import run_model, sanitize_future_timeline_topic
 from .generate_present_timeline import generate_present_timeline
 from .bm25_retriever import BM25NewsIndex, BM25SearchTool
-from .dense_retriever import DenseNewsIndex, DenseSearchTool, DualSearchAgent
+from .deep_search_trace import (
+    DeepSearchTraceStore,
+    log_trace_write_completed,
+    log_trace_write_started,
+    trace_timestamp,
+)
+from .dense_retriever import (
+    DenseNewsIndex,
+    DenseSearchTool,
+    DualSearchAgent,
+    build_deep_search_prompt,
+)
 from .news_relevance_dspy import SelectRelevantArticles
 from .storage import SimulationStorage
+
+DEEP_SEARCH_TRACE_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "data"
+    / "agent_trace"
+    / "deep_news_relevance"
+)
 
 
 @dataclass(frozen=True)
@@ -581,6 +599,8 @@ class AgenticRelevanceService:
         """Retrieve and store agent-selected relevance records."""
         summaries = []
         total_candidates = 0
+        trace_store = DeepSearchTraceStore(DEEP_SEARCH_TRACE_DIR)
+        logging.info("Deep search trace store ready path=%s", trace_store.base_dir)
         for event_group in event_groups:
             event_group_id = event_group.id()
             logging.info(
@@ -614,11 +634,13 @@ class AgenticRelevanceService:
                 event_group_id,
             )
             search_started_at = time.perf_counter()
-            relevant_article_ids = agent.find_relevant(
+            prediction = agent.predict(
                 event_group_prompt=event_prompt,
                 present_timeline=present_timeline,
                 max_results=self.max_results,
             )
+            relevant_article_ids = agent.extract_relevant_ids(prediction)
+            raw_relevant_article_ids = list(relevant_article_ids)
             candidate_by_id: dict[str, NewsArticle] = {}
             for article in bm25_tool.collected_articles():
                 candidate_by_id[article.article_id] = article
@@ -646,6 +668,50 @@ class AgenticRelevanceService:
                 relevant_article_ids = [
                     article_id for article_id in relevant_article_ids if article_id in candidate_ids
                 ]
+            tool_calls = sorted(
+                bm25_tool.query_log + dense_tool.query_log,
+                key=lambda item: item["logged_at"],
+            )
+            trace_record = {
+                "trace_created_at": trace_timestamp(),
+                "event_group_id": event_group_id,
+                "run_id": run_id,
+                "model": self.relevance_model,
+                "max_iters": self.max_iters,
+                "max_results": self.max_results,
+                "search_top_k": self.search_top_k,
+                "prompt": {
+                    "event_group_prompt": event_prompt,
+                    "deep_search_prompt": build_deep_search_prompt(event_prompt),
+                    "present_timeline": present_timeline,
+                },
+                "timing": {"search_seconds": elapsed},
+                "tool_calls": tool_calls,
+                "tools": {
+                    "bm25": {
+                        "query_count": len(bm25_tool.query_log),
+                        "queries": bm25_tool.query_log,
+                        "candidate_ids": list(bm25_tool.candidate_ids),
+                    },
+                    "dense": {
+                        "query_count": len(dense_tool.query_log),
+                        "queries": dense_tool.query_log,
+                        "candidate_ids": list(dense_tool.candidate_ids),
+                    },
+                },
+                "candidates": {
+                    "total": len(candidate_articles),
+                    "ids": [article.article_id for article in candidate_articles],
+                },
+                "raw_relevant_article_ids": raw_relevant_article_ids,
+                "relevant_article_ids": list(relevant_article_ids),
+                "unknown_article_ids": unknown_ids,
+                "prediction": serialize_prediction(prediction),
+            }
+            trace_path = trace_store.base_dir / f"{event_group_id}.jsonl"
+            trace_started_at = log_trace_write_started(event_group_id, trace_path)
+            trace_store.append_trace(event_group_id, trace_record)
+            log_trace_write_completed(event_group_id, trace_path, trace_started_at)
             relevant_set = set(relevant_article_ids)
             logging.info(
                 "Deep search semantic deduplication starting event_group_id=%s candidates=%s threshold=%.3f",
@@ -866,6 +932,21 @@ def build_present_timeline_context(record: dict) -> str:
 def prompt_text_from_record(record: dict) -> str:
     """Return prompt text for a relevance record."""
     return f"{record['article_title']}\n\n{record['article_desc']}".strip()
+
+
+def serialize_prediction(prediction: dspy.Prediction) -> dict:
+    """Return a JSON-safe snapshot of a DSPy prediction."""
+    if prediction is None:
+        return {}
+    if hasattr(prediction, "model_dump"):
+        return prediction.model_dump()
+    if hasattr(prediction, "to_dict"):
+        return prediction.to_dict()
+    return {
+        key: value
+        for key, value in prediction.__dict__.items()
+        if not key.startswith("_")
+    }
 
 
 def build_sanitized_future_topic(event_group: EventGroup, model: str) -> str:

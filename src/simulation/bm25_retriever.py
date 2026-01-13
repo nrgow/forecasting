@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import datetime as dt
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -69,13 +70,13 @@ class BM25SearchTool:
     def search(self, query: str, top_k: int | None = None) -> list[dict]:
         """Search the lexical BM25 index and return article summaries."""
         search_top_k = top_k if top_k is not None else self.default_top_k
+        logged_at = dt.datetime.now(dt.timezone.utc).isoformat()
         logging.info(
             "BM25 query event_group_id=%s query=%s top_k=%s",
             self.event_group_id,
             query,
             search_top_k,
         )
-        self.query_log.append({"query": query, "top_k": search_top_k})
         results = self.index.search(query, search_top_k)
         summaries = []
         for article in results:
@@ -92,6 +93,15 @@ class BM25SearchTool:
                     "outlet_name": article.outlet_name,
                 }
             )
+        self.query_log.append(
+            {
+                "tool": "bm25",
+                "query": query,
+                "top_k": search_top_k,
+                "logged_at": logged_at,
+                "results": summaries,
+            }
+        )
         return summaries
 
     def collected_articles(self) -> list["NewsArticle"]:
@@ -111,7 +121,7 @@ class DeepSearchAgent(dspy.Module):
         dspy.configure(lm=dspy.LM(model))
         self.module = dspy.ReAct(
             DeepSearchRelevantArticles,
-            tools=[self.search_tool.search],
+            tools=[dspy.Tool(self.search_tool.search, name="bm25_search")],
             max_iters=max_iters,
         )
 
@@ -129,6 +139,32 @@ class DeepSearchAgent(dspy.Module):
             max_results=max_results,
         )
 
+    def predict(
+        self,
+        event_group_prompt: str,
+        present_timeline: str,
+        max_results: int,
+    ) -> dspy.Prediction:
+        """Return the raw prediction for the deep search call."""
+        return self(
+            event_group_prompt=event_group_prompt,
+            present_timeline=present_timeline,
+            max_results=max_results,
+        )
+
+    def extract_relevant_ids(self, prediction: dspy.Prediction) -> list[str]:
+        """Return relevant article ids from a DSPy prediction."""
+        if prediction is None:
+            raise ValueError("Deep search agent returned no result.")
+        if prediction.relevant_article_ids is None:
+            raise ValueError("Deep search agent returned no relevant_article_ids.")
+        if not isinstance(prediction.relevant_article_ids, list):
+            raise ValueError(
+                "Deep search agent returned non-list relevant_article_ids "
+                f"type={type(prediction.relevant_article_ids)} model={self.model}"
+            )
+        return prediction.relevant_article_ids
+
     def find_relevant(
         self,
         event_group_prompt: str,
@@ -136,18 +172,9 @@ class DeepSearchAgent(dspy.Module):
         max_results: int,
     ) -> list[str]:
         """Return relevant article ids selected by the agent."""
-        result = self(
+        prediction = self.predict(
             event_group_prompt=event_group_prompt,
             present_timeline=present_timeline,
             max_results=max_results,
         )
-        if result is None:
-            raise ValueError("Deep search agent returned no result.")
-        if result.relevant_article_ids is None:
-            raise ValueError("Deep search agent returned no relevant_article_ids.")
-        if not isinstance(result.relevant_article_ids, list):
-            raise ValueError(
-                "Deep search agent returned non-list relevant_article_ids "
-                f"type={type(result.relevant_article_ids)} model={self.model}"
-            )
-        return result.relevant_article_ids
+        return self.extract_relevant_ids(prediction)
