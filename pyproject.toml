@@ -41,4 +41,8 @@ dependencies = [
     "luxical>=1.1.2",
     "leann>=0.3.6",
     "faiss-cpu>=1.13.2",
+    "fastmcp>=2.14.3",
 ]
+
+[project.scripts]
+newstalk_mcp = "src.mcp_server:main"
