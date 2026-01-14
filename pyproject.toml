@@ -42,6 +42,7 @@ dependencies = [
     "leann>=0.3.6",
     "faiss-cpu>=1.13.2",
     "fastmcp>=2.14.3",
+    "mxbai-rerank>=0.1.6",
 ]
 
 [project.scripts]

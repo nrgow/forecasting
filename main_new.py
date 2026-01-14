@@ -12,15 +12,20 @@ class CLI:
     def run_pipeline(
         self,
         force_future: bool = False,
-        use_lazy_retriever: bool = True,
+        use_lazy_retriever: bool = False,
+        use_reranker: bool = True,
     ) -> None:
         """Run the main data pipeline."""
-        run_pipeline(force_future=force_future, use_lazy_retriever=use_lazy_retriever)
+        run_pipeline(
+            force_future=force_future,
+            use_lazy_retriever=use_lazy_retriever,
+            use_reranker=use_reranker,
+        )
 
     def run_openforecaster(
         self,
         max_news: int = 8,
-        max_new_tokens: int = 512*4,
+        max_new_tokens: int = 512 * 4,
         temperature: float = 0.2,
         model_name: str = "nikhilchandak/OpenForecaster-8B",
     ) -> None:

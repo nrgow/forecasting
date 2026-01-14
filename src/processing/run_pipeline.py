@@ -17,6 +17,7 @@ from ..simulation.simulation_pipeline import (
 def run_pipeline(
     force_future: bool = False,
     use_lazy_retriever: bool = True,
+    use_reranker: bool = False,
     luxical_model_path: str | None = None,
     luxical_model_id: str | None = "DatologyAI/luxical-one",
     luxical_model_filename: str | None = "luxical_one_rc4.npz",
@@ -57,7 +58,11 @@ def run_pipeline(
     )
     logging.info(
         "Relevance module=%s",
-        "lazy(agentic)" if use_lazy_retriever else "eager(classifier)",
+        "lazy(agentic)"
+        if use_lazy_retriever
+        else "eager(reranker)"
+        if use_reranker
+        else "eager(classifier)",
     )
     relevance_run = run_relevance_pipeline(
         active_event_groups_path=Path("data") / "active_event_groups.jsonl",
@@ -68,12 +73,17 @@ def run_pipeline(
         luxical_model_path=luxical_model_path,
         luxical_model_id=luxical_model_id,
         luxical_model_filename=luxical_model_filename,
+        use_reranker=True,
+        reranker_model_name="mixedbread-ai/mxbai-rerank-base-v2",
+        # optional:
+        reranker_backend="mxbai",
+
     )
     logging.info("Relevance pipeline completed run_id=%s", relevance_run["run_id"])
-    run_future_timeline_pipeline(
-        active_event_groups_path=Path("data") / "active_event_groups.jsonl",
-        events_path=events_path,
-        storage_dir=Path("data") / "simulation",
-        relevance_run_id=relevance_run["run_id"],
-        force_without_relevance=True,
-    )
+    #run_future_timeline_pipeline(
+    #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
+    #    events_path=events_path,
+    #    storage_dir=Path("data") / "simulation",
+    #    relevance_run_id=relevance_run["run_id"],
+    #    force_without_relevance=True,
+    #)

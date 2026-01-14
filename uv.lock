@@ -296,6 +296,15 @@ wheels = [
 ]
 
 [[package]]
+name = "batched"
+version = "0.1.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/40/8d9a8ed9b95cb95acf599698557b7074b462df652823a61e7e43899aa519/batched-0.1.5.tar.gz", hash = "sha256:58b8a41d3f8d4d39a0edba79c6238ed204938cfc2c8908224919d70af07c610d", size = 23940, upload-time = "2025-07-14T09:58:31.862Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/c8/16a977fd90cdc974ef7781e237b8a0e0008a6204768ededbef2b2ff1bb43/batched-0.1.5-py3-none-any.whl", hash = "sha256:356dae99f15c906629992e4bd3481a857114790b5316268fa38fe8ad0d0b9480", size = 29367, upload-time = "2025-07-14T09:58:30.968Z" },
+]
+
+[[package]]
 name = "beartype"
 version = "0.22.9"
 source = { registry = "https://pypi.org/simple" }
@@ -2298,6 +2307,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0a/7d/a988f258104dcd2ccf1ed40fdc97e26c4ac351eeaf81d76e266c52d84e2f/multiprocess-0.70.16-py312-none-any.whl", hash = "sha256:fc0544c531920dde3b00c29863377f87e1632601092ea2daca74e4beb40faa2e", size = 146741, upload-time = "2024-01-28T18:52:29.395Z" },
     { url = "https://files.pythonhosted.org/packages/ea/89/38df130f2c799090c978b366cfdf5b96d08de5b29a4a293df7f7429fa50b/multiprocess-0.70.16-py38-none-any.whl", hash = "sha256:a71d82033454891091a226dfc319d0cfa8019a4e888ef9ca910372a446de4435", size = 132628, upload-time = "2024-01-28T18:52:30.853Z" },
     { url = "https://files.pythonhosted.org/packages/da/d9/f7f9379981e39b8c2511c9e0326d212accacb82f12fbfdc1aa2ce2a7b2b6/multiprocess-0.70.16-py39-none-any.whl", hash = "sha256:a0bafd3ae1b732eac64be2e72038231c1ba97724b60b09400d68f229fcc2fbf3", size = 133351, upload-time = "2024-01-28T18:52:31.981Z" },
+]
+
+[[package]]
+name = "mxbai-rerank"
+version = "0.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "accelerate" },
+    { name = "batched" },
+    { name = "numpy" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0f/76/a19c864a1025222d3304a888ed4ed9217bfdf55dbaf4ed37500ee03935e0/mxbai_rerank-0.1.6.tar.gz", hash = "sha256:8d08e8464796429a7415314ce6de682bf9b538eb4ee5a7ddcd1a07839ee02879", size = 21449, upload-time = "2025-06-02T14:59:42.45Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a6/2a/503622b3a80272c662dabef421c9635168e5cbf6d51f0aa1883998561292/mxbai_rerank-0.1.6-py3-none-any.whl", hash = "sha256:aee94e7a14d5fba6520052ff2098f0f03db6cd9cc39553b7d2e82389deec9e05", size = 18458, upload-time = "2025-06-02T14:59:41.003Z" },
 ]
 
 [[package]]
@@ -4753,6 +4779,7 @@ dependencies = [
     { name = "luxical" },
     { name = "markdownify" },
     { name = "more-itertools" },
+    { name = "mxbai-rerank" },
     { name = "numba" },
     { name = "numpy" },
     { name = "openai" },
@@ -4794,6 +4821,7 @@ requires-dist = [
     { name = "luxical", specifier = ">=1.1.2" },
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "more-itertools", specifier = ">=10.7.0" },
+    { name = "mxbai-rerank", specifier = ">=0.1.6" },
     { name = "numba", specifier = ">=0.63.1" },
     { name = "numpy", specifier = ">=2.3.2" },
     { name = "openai", specifier = ">=1.102.0" },

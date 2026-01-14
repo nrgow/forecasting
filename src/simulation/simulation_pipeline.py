@@ -13,9 +13,12 @@ from typing import Callable, Iterable
 import dspy
 import more_itertools as mit
 import numpy as np
+import torch
 from huggingface_hub import hf_hub_download
 from luxical.embedder import Embedder
+from mxbai_rerank import MxbaiRerankV2
 from sentence_transformers import SentenceTransformer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
 
 from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
 from ..news_enrichment import ZeroShotClassifier
@@ -343,6 +346,211 @@ class NewsRelevanceJudge:
         return result.relevant_articles
 
 
+class NewsRelevanceReranker:
+    """Local reranker model for scoring news relevance."""
+
+    def __init__(
+        self,
+        model_name: str,
+        instruction: str | None,
+        max_length: int,
+        batch_size: int,
+    ) -> None:
+        """Initialize the reranker with prompt and batching settings."""
+        self.model_name = model_name
+        if instruction is None:
+            instruction = (
+                "Given an event description, determine whether the news article is relevant."
+            )
+        self.instruction = instruction
+        self.max_length = max_length
+        self.batch_size = batch_size
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name,
+            padding_side="left",
+        )
+        if torch.cuda.is_available():
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+            self.model.to("cpu")
+        self.model.eval()
+        self.token_false_id = self.tokenizer.convert_tokens_to_ids("no")
+        self.token_true_id = self.tokenizer.convert_tokens_to_ids("yes")
+        self.prefix = (
+            "<|im_start|>system\n"
+            "Judge whether the Document meets the requirements based on the Query and the Instruct "
+            "provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n"
+            "<|im_start|>user\n"
+        )
+        self.suffix = (
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        )
+        self.prefix_tokens = self.tokenizer.encode(self.prefix, add_special_tokens=False)
+        self.suffix_tokens = self.tokenizer.encode(self.suffix, add_special_tokens=False)
+
+    def _format_instruction(self, query: str, doc: str) -> str:
+        """Return a formatted reranker prompt for a query/document pair."""
+        return (
+            f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {doc}"
+        )
+
+    def _process_inputs(self, pairs: list[str]) -> dict[str, torch.Tensor]:
+        """Tokenize and pad reranker inputs with prefix and suffix tokens."""
+        inputs = self.tokenizer(
+            pairs,
+            padding=False,
+            truncation="longest_first",
+            return_attention_mask=False,
+            max_length=self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens),
+        )
+        for idx, token_ids in enumerate(inputs["input_ids"]):
+            inputs["input_ids"][idx] = self.prefix_tokens + token_ids + self.suffix_tokens
+        inputs = self.tokenizer.pad(
+            inputs,
+            padding=True,
+            return_tensors="pt",
+            max_length=self.max_length,
+        )
+        for key in inputs:
+            inputs[key] = inputs[key].to(self.model.device)
+        return inputs
+
+    @torch.no_grad()
+    def _compute_logits(self, inputs: dict[str, torch.Tensor]) -> list[float]:
+        """Compute relevance scores from model logits."""
+        batch_scores = self.model(**inputs).logits[:, -1, :]
+        true_vector = batch_scores[:, self.token_true_id]
+        false_vector = batch_scores[:, self.token_false_id]
+        batch_scores = torch.stack([false_vector, true_vector], dim=1)
+        batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
+        return batch_scores[:, 1].exp().tolist()
+
+    def score(self, query: str, docs: list[str]) -> list[float]:
+        """Return reranker scores for a single query against many documents."""
+        pairs = [self._format_instruction(query, doc) for doc in docs]
+        scores: list[float] = []
+        for chunk in mit.chunked(pairs, self.batch_size):
+            chunk_list = list(chunk)
+            inputs = self._process_inputs(chunk_list)
+            scores.extend(self._compute_logits(inputs))
+        return scores
+
+
+class NemotronReranker:
+    """Local Nemotron reranker for scoring news relevance."""
+
+    def __init__(
+        self,
+        model_name: str,
+        max_length: int,
+        batch_size: int,
+    ) -> None:
+        """Initialize the Nemotron reranker with prompt and batching settings."""
+        self.model_name = model_name
+        self.max_length = max_length
+        self.batch_size = batch_size
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            padding_side="left",
+        )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        model_kwargs: dict = {"trust_remote_code": True}
+        if torch.cuda.is_available():
+            model_kwargs["torch_dtype"] = torch.bfloat16
+        config = AutoConfig.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+        )
+        config.model_type = "llama"
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name,
+            config=config,
+            **model_kwargs,
+        ).eval()
+        if self.model.config.pad_token_id is None:
+            self.model.config.pad_token_id = self.tokenizer.eos_token_id
+        if torch.cuda.is_available():
+            self.model = self.model.to("cuda")
+        else:
+            self.model = self.model.to("cpu")
+
+    def _format_prompt(self, query: str, doc: str) -> str:
+        """Return the prompt string for a query/document pair."""
+        return f"question:{query} \n \n passage:{doc}"
+
+    def score(self, query: str, docs: list[str]) -> list[float]:
+        """Return reranker scores for a single query against many documents."""
+        pairs = [self._format_prompt(query, doc) for doc in docs]
+        scores: list[float] = []
+        for chunk in mit.chunked(pairs, self.batch_size):
+            chunk_list = list(chunk)
+            batch = self.tokenizer(
+                chunk_list,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+                max_length=self.max_length,
+            )
+            for key in batch:
+                batch[key] = batch[key].to(self.model.device)
+            with torch.inference_mode():
+                logits = self.model(**batch).logits
+                probs = torch.sigmoid(logits.view(-1))
+                scores.extend(probs.tolist())
+        return scores
+
+
+class MxbaiReranker:
+    """Local Mxbai reranker for scoring news relevance."""
+
+    def __init__(
+        self,
+        model_name: str,
+        instruction: str | None,
+        max_length: int,
+        batch_size: int,
+    ) -> None:
+        """Initialize the Mxbai reranker with prompt and batching settings."""
+        self.model_name = model_name
+        self.instruction = instruction
+        self.max_length = max_length
+        self.batch_size = batch_size
+        if torch.cuda.is_available():
+            device = "cuda"
+            torch_dtype = torch.bfloat16
+        else:
+            device = "cpu"
+            torch_dtype = "auto"
+        self.reranker = MxbaiRerankV2(
+            self.model_name,
+            device=device,
+            torch_dtype=torch_dtype,
+            max_length=self.max_length,
+        )
+
+    def score(self, query: str, docs: list[str]) -> list[float]:
+        """Return reranker scores for a single query against many documents."""
+        scores: list[float] = []
+        for chunk in mit.chunked(docs, self.batch_size):
+            chunk_list = list(chunk)
+            batch_queries = [query] * len(chunk_list)
+            batch_scores = self.reranker.predict(
+                queries=batch_queries,
+                documents=chunk_list,
+                instruction=self.instruction,
+                normalize=True,
+            )
+            scores.extend(batch_scores.view(-1).tolist())
+        return scores
+
+
 class FutureTimelineEstimator:
     """Generate future timelines and implied probability estimates."""
 
@@ -560,6 +768,134 @@ class RelevanceJudgmentService:
                     "event_group_id": event_group_id,
                     "clusters_considered": len(candidates),
                     "articles_considered": considered_articles,
+                    "relevant_articles": relevant_articles,
+                }
+            )
+        return summaries
+
+
+class RerankerRelevanceService:
+    """Evaluate articles with a local reranker against event groups."""
+
+    def __init__(
+        self,
+        storage: SimulationStorage,
+        model_name: str,
+        backend: str,
+        instruction: str | None,
+        max_length: int,
+        batch_size: int,
+        min_score: float,
+    ) -> None:
+        """Initialize the reranker service with scoring thresholds."""
+        self.storage = storage
+        self.backend = backend
+        if self.backend == "auto":
+            if "llama-nemotron-rerank" in model_name:
+                self.backend = "nemotron"
+            elif "mxbai-rerank" in model_name:
+                self.backend = "mxbai"
+            else:
+                self.backend = "qwen3"
+        if self.backend == "nemotron":
+            self.reranker = NemotronReranker(
+                model_name=model_name,
+                max_length=max_length,
+                batch_size=batch_size,
+            )
+        elif self.backend == "mxbai":
+            self.reranker = MxbaiReranker(
+                model_name=model_name,
+                instruction=instruction,
+                max_length=max_length,
+                batch_size=batch_size,
+            )
+        else:
+            self.reranker = NewsRelevanceReranker(
+                model_name=model_name,
+                instruction=instruction,
+                max_length=max_length,
+                batch_size=batch_size,
+            )
+        self.min_score = min_score
+
+    def process(
+        self,
+        event_groups: list[EventGroup],
+        articles: list[NewsArticle],
+        run_id: str,
+    ) -> list[dict]:
+        """Score relevance and store reranker judgments."""
+        logging.info(
+            "Relevance reranker starting event_groups=%s articles=%s batch_size=%s",
+            len(event_groups),
+            len(articles),
+            self.reranker.batch_size,
+        )
+        existing = self.storage.load_relevance_index()
+        summaries = []
+        for event_group in event_groups:
+            event_group_id = event_group.id()
+            candidates = [
+                article
+                for article in articles
+                if (event_group_id, article.article_id) not in existing
+            ]
+            if not candidates:
+                logging.info(
+                    "Relevance reranker skipping event_group_id=%s; no candidates",
+                    event_group_id,
+                )
+                continue
+            query = build_event_group_prompt(event_group)
+            docs = [article.prompt_text() for article in candidates]
+            logging.info(
+                "Relevance reranker scoring event_group_id=%s candidates=%s backend=%s",
+                event_group_id,
+                len(candidates),
+                self.backend,
+            )
+            started_at = time.perf_counter()
+            scores = self.reranker.score(query, docs)
+            elapsed = time.perf_counter() - started_at
+            items_per_sec = len(candidates) / elapsed
+            relevant_articles = 0
+            for article, score in zip(candidates, scores):
+                relevant = score >= self.min_score
+                if relevant:
+                    relevant_articles += 1
+                record = {
+                    "event_group_id": event_group_id,
+                    "article_id": article.article_id,
+                    "article_url": article.url,
+                    "article_title": article.title,
+                    "article_desc": article.desc,
+                    "article_published_at": article.published_at.isoformat(),
+                    "relevant": relevant,
+                    "judged_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "model": self.reranker.model_name,
+                    "run_id": run_id,
+                    "dedup_cluster_id": article.article_id,
+                    "dedup_cluster_size": 1,
+                    "dedup_representative_id": article.article_id,
+                    "dedup_representative": True,
+                    "reranker_score": score,
+                    "reranker_threshold": self.min_score,
+                    "reranker_instruction": self.reranker.instruction,
+                }
+                self.storage.append_relevance_judgment(record)
+            logging.info(
+                "Relevance reranker completed event_group_id=%s candidates=%s relevant=%s seconds=%.2f items_per_sec=%.2f",
+                event_group_id,
+                len(candidates),
+                relevant_articles,
+                elapsed,
+                items_per_sec,
+            )
+            summaries.append(
+                {
+                    "event_group_id": event_group_id,
+                    "articles_considered": len(candidates),
                     "relevant_articles": relevant_articles,
                 }
             )
@@ -1191,6 +1527,7 @@ def run_realtime_simulation_pipeline(
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = False,
+    use_reranker: bool = False,
     luxical_model_path: str | None = None,
     luxical_model_id: str | None = "DatologyAI/luxical-one",
     luxical_model_filename: str | None = "luxical_one_rc4.npz",
@@ -1203,9 +1540,12 @@ def run_realtime_simulation_pipeline(
 ) -> dict:
     """Run the real-time simulation pipeline for active event groups."""
     logging.info("Real-time simulation pipeline starting")
+    relevance_mode = "lazy(agentic)" if use_lazy_retriever else "eager(classifier)"
+    if use_reranker and not use_lazy_retriever:
+        relevance_mode = "eager(reranker)"
     logging.info(
         "Real-time relevance mode=%s",
-        "lazy(agentic)" if use_lazy_retriever else "eager(classifier)",
+        relevance_mode,
     )
     relevance = run_relevance_pipeline(
         active_event_groups_path=active_event_groups_path,
@@ -1214,6 +1554,7 @@ def run_realtime_simulation_pipeline(
         storage_dir=storage_dir,
         relevance_model=relevance_model,
         use_lazy_retriever=use_lazy_retriever,
+        use_reranker=use_reranker,
         luxical_model_path=luxical_model_path,
         luxical_model_id=luxical_model_id,
         luxical_model_filename=luxical_model_filename,
@@ -1240,6 +1581,7 @@ def run_relevance_pipeline(
     storage_dir: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = False,
+    use_reranker: bool = False,
     luxical_model_path: str | None = None,
     luxical_model_id: str | None = "DatologyAI/luxical-one",
     luxical_model_filename: str | None = "luxical_one_rc4.npz",
@@ -1247,6 +1589,12 @@ def run_relevance_pipeline(
     lazy_max_iters: int = 6,
     lazy_max_results: int = 50,
     lazy_dedup_similarity_threshold: float = 0.97,
+    reranker_model_name: str = "Qwen/Qwen3-Reranker-0.6B",
+    reranker_backend: str = "auto",
+    reranker_instruction: str | None = None,
+    reranker_max_length: int = 8192,
+    reranker_batch_size: int = 8,
+    reranker_min_score: float = 0.5,
     zero_shot_min_probability: float = 0.5,
     zero_shot_class_name: str = "international politics geopolitics world financial markets",
     dedup_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
@@ -1259,9 +1607,16 @@ def run_relevance_pipeline(
     run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
     logging.info("Relevance run %s starting", run_id)
+    relevance_mode = "lazy(agentic)" if use_lazy_retriever else "eager(classifier)"
+    if use_reranker and not use_lazy_retriever:
+        relevance_mode = "eager(reranker)"
+        if reranker_instruction is None:
+            reranker_instruction = (
+                "Given an event description, determine whether the news article is relevant."
+            )
     logging.info(
         "Relevance module=%s",
-        "lazy(agentic)" if use_lazy_retriever else "eager(classifier)",
+        relevance_mode,
     )
     last_judged_at = storage.last_relevance_judged_at()
     cutoff = run_started_at - dt.timedelta(hours=24)
@@ -1329,42 +1684,99 @@ def run_relevance_pipeline(
         articles_considered = total_candidates
         clusters_considered = None
         dedup_ratio = None
+        relevance_mode = "lazy"
     else:
-        logging.info(
-            "Relevance eager pipeline starting zero_shot_class_name=%s dedup_model_name=%s",
-            zero_shot_class_name,
-            dedup_model_name,
-        )
-        articles = apply_zero_shot_filter(
-            articles=articles,
-            storage=storage,
-            run_id=run_id,
-            class_name=zero_shot_class_name,
-            min_probability=zero_shot_min_probability,
-        )
-        dedup_clusters = apply_semantic_deduplication(
-            articles=articles,
-            model_name=dedup_model_name,
-            similarity_threshold=dedup_similarity_threshold,
-            batch_size=dedup_batch_size,
-        )
-        dedup_ratio = len(dedup_clusters) / len(articles) if articles else 0.0
-        logging.info(
-            "Relevance articles=%s clusters=%s news_paths=%s batch_size=%s",
-            len(articles),
-            len(dedup_clusters),
-            len(news_paths),
-            batch_size,
-        )
+        zero_shot_started_at = time.perf_counter()
+        if use_reranker:
+            logging.info(
+                "Relevance eager reranker starting zero_shot_class_name=%s reranker_model_name=%s",
+                zero_shot_class_name,
+                reranker_model_name,
+            )
+            articles = apply_zero_shot_filter(
+                articles=articles,
+                storage=storage,
+                run_id=run_id,
+                class_name=zero_shot_class_name,
+                min_probability=zero_shot_min_probability,
+            )
+            zero_shot_elapsed = time.perf_counter() - zero_shot_started_at
+            logging.info(
+                "Relevance zero-shot completed seconds=%.2f articles=%s",
+                zero_shot_elapsed,
+                len(articles),
+            )
+            relevance_service = RerankerRelevanceService(
+                storage=storage,
+                model_name=reranker_model_name,
+                backend=reranker_backend,
+                instruction=reranker_instruction,
+                max_length=reranker_max_length,
+                batch_size=reranker_batch_size,
+                min_score=reranker_min_score,
+            )
+            reranker_started_at = time.perf_counter()
+            summaries = relevance_service.process(event_groups, articles, run_id)
+            reranker_elapsed = time.perf_counter() - reranker_started_at
+            logging.info(
+                "Relevance reranker completed seconds=%.2f articles=%s",
+                reranker_elapsed,
+                len(articles),
+            )
+            articles_considered = len(articles)
+            clusters_considered = None
+            dedup_ratio = None
+            relevance_mode = "eager_reranker"
+        else:
+            logging.info(
+                "Relevance eager pipeline starting zero_shot_class_name=%s dedup_model_name=%s",
+                zero_shot_class_name,
+                dedup_model_name,
+            )
+            articles = apply_zero_shot_filter(
+                articles=articles,
+                storage=storage,
+                run_id=run_id,
+                class_name=zero_shot_class_name,
+                min_probability=zero_shot_min_probability,
+            )
+            zero_shot_elapsed = time.perf_counter() - zero_shot_started_at
+            logging.info(
+                "Relevance zero-shot completed seconds=%.2f articles=%s",
+                zero_shot_elapsed,
+                len(articles),
+            )
+            dedup_started_at = time.perf_counter()
+            dedup_clusters = apply_semantic_deduplication(
+                articles=articles,
+                model_name=dedup_model_name,
+                similarity_threshold=dedup_similarity_threshold,
+                batch_size=dedup_batch_size,
+            )
+            dedup_elapsed = time.perf_counter() - dedup_started_at
+            dedup_ratio = len(dedup_clusters) / len(articles) if articles else 0.0
+            logging.info(
+                "Relevance dedup completed seconds=%.2f clusters=%s",
+                dedup_elapsed,
+                len(dedup_clusters),
+            )
+            logging.info(
+                "Relevance articles=%s clusters=%s news_paths=%s batch_size=%s",
+                len(articles),
+                len(dedup_clusters),
+                len(news_paths),
+                batch_size,
+            )
 
-        relevance_service = RelevanceJudgmentService(
-            storage=storage,
-            relevance_model=relevance_model,
-            batch_size=batch_size,
-        )
-        summaries = relevance_service.process(event_groups, dedup_clusters, run_id)
-        articles_considered = len(articles)
-        clusters_considered = len(dedup_clusters)
+            relevance_service = RelevanceJudgmentService(
+                storage=storage,
+                relevance_model=relevance_model,
+                batch_size=batch_size,
+            )
+            summaries = relevance_service.process(event_groups, dedup_clusters, run_id)
+            articles_considered = len(articles)
+            clusters_considered = len(dedup_clusters)
+            relevance_mode = "eager_llm"
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
     run_record = {
@@ -1380,6 +1792,7 @@ def run_relevance_pipeline(
         "event_group_summaries": summaries,
         "relevance_model": relevance_model,
         "retrieval_strategy": "lazy" if use_lazy_retriever else "eager",
+        "relevance_mode": relevance_mode,
         "bm25_indexed_articles": articles_total if use_lazy_retriever else None,
         "dense_indexed_articles": articles_total if use_lazy_retriever else None,
         "bm25_candidates": articles_considered if use_lazy_retriever else None,
@@ -1391,6 +1804,12 @@ def run_relevance_pipeline(
         "dedup_model_name": dedup_model_name if not use_lazy_retriever else None,
         "dedup_similarity_threshold": dedup_similarity_threshold if not use_lazy_retriever else None,
         "dedup_batch_size": dedup_batch_size if not use_lazy_retriever else None,
+        "reranker_model_name": reranker_model_name if use_reranker else None,
+        "reranker_backend": reranker_backend if use_reranker else None,
+        "reranker_instruction": reranker_instruction if use_reranker else None,
+        "reranker_max_length": reranker_max_length if use_reranker else None,
+        "reranker_batch_size": reranker_batch_size if use_reranker else None,
+        "reranker_min_score": reranker_min_score if use_reranker else None,
     }
     storage.append_run_metadata(run_record)
     logging.info("Relevance run %s completed", run_id)
@@ -1473,6 +1892,7 @@ def run_simulation_pipeline(
     max_events: int | None = None,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = False,
+    use_reranker: bool = False,
     luxical_model_path: str | None = None,
     luxical_model_id: str | None = "DatologyAI/luxical-one",
     luxical_model_filename: str | None = "luxical_one_rc4.npz",
@@ -1502,6 +1922,7 @@ def run_simulation_pipeline(
         storage_dir=storage_dir,
         relevance_model=relevance_model,
         use_lazy_retriever=use_lazy_retriever,
+        use_reranker=use_reranker,
         luxical_model_path=luxical_model_path,
         luxical_model_id=luxical_model_id,
         luxical_model_filename=luxical_model_filename,
