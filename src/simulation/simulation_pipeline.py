@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from itertools import chain, islice
+from itertools import chain
 from pathlib import Path
 from typing import Callable, Iterable
 

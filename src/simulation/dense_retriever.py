@@ -6,7 +6,6 @@ import json
 import logging
 from pathlib import Path
 import pickle
-import sys
 import tempfile
 import time
 from typing import TYPE_CHECKING
