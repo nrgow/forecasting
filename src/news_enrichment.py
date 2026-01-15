@@ -12,6 +12,8 @@ from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 
+from .mlflow_tracing import configure_dspy_autolog
+
 
 class Processor:
     def process_batch(self, data: list[dict]):
@@ -397,6 +399,7 @@ class BoilerplateRemover(Processor):
             api_base=self.vllm_openai_api_base,
             api_key=self.vllm_openai_api_key,
         )
+        configure_dspy_autolog()
         dspy.settings.configure(lm=self.lm)
         self.module = dspy.Predict(BoilerplateRemover.BoilerplateRemovalInfo)
 
@@ -464,6 +467,7 @@ class ENPipelineClassifier(Processor):
 
 class ZeroShotClassifier(Processor):
     """Run zero-shot classification with configurable batching."""
+
     def __init__(
         self,
         model_name="MoritzLaurer/deberta-v3-large-zeroshot-v2.0",

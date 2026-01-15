@@ -6,6 +6,7 @@ import wikipedia
 import json
 import sqlitedict
 
+
 def think_tool(reflection: str) -> str:
     """Tool for strategic reflection on timeline generation progress and decision-making.
 
@@ -41,7 +42,9 @@ class CachedWikipedia:
     def __init__(self):
         """Initialize page and search caches."""
         self.page_cache = sqlitedict.SqliteDict("wikipedia_page_cache", autocommit=True)
-        self.search_cache = sqlitedict.SqliteDict("wikipedia_search_cache", autocommit=True)        
+        self.search_cache = sqlitedict.SqliteDict(
+            "wikipedia_search_cache", autocommit=True
+        )
 
     def _candidate_titles(self, page_title: str) -> list[str]:
         """Return ordered, unique title variants to try."""
@@ -91,7 +94,11 @@ class CachedWikipedia:
                 rval = markdownify(page.html())
                 self.page_cache[page_title] = rval
                 elapsed = time.perf_counter() - started_at
-                logging.info("get_wikipedia_page completed title=%s seconds=%.2f", candidate, elapsed)
+                logging.info(
+                    "get_wikipedia_page completed title=%s seconds=%.2f",
+                    candidate,
+                    elapsed,
+                )
                 return rval
             except wikipedia.exceptions.DisambiguationError as exc:
                 logging.info(
@@ -101,7 +108,9 @@ class CachedWikipedia:
                 )
                 last_error = exc
             except wikipedia.exceptions.WikipediaException as exc:
-                logging.info("get_wikipedia_page failed title=%s error=%s", candidate, exc)
+                logging.info(
+                    "get_wikipedia_page failed title=%s error=%s", candidate, exc
+                )
                 last_error = exc
 
         search_term = " ".join(page_title.split())
@@ -127,7 +136,9 @@ class CachedWikipedia:
         rval = markdownify(page.html())
         self.page_cache[page_title] = rval
         elapsed = time.perf_counter() - started_at
-        logging.info("get_wikipedia_page completed title=%s seconds=%.2f", best_title, elapsed)
+        logging.info(
+            "get_wikipedia_page completed title=%s seconds=%.2f", best_title, elapsed
+        )
         return rval
 
     def search_wikipedia_pages(self, term: str, n_results: int = 10) -> list[str]:
@@ -140,13 +151,14 @@ class CachedWikipedia:
         Returns:
             List of potentially relevant Wikipedia page titles.
         """
-        logging.info(f"called search_wikipedia_pages with parameters {term=} {n_results=}")
+        logging.info(
+            f"called search_wikipedia_pages with parameters {term=} {n_results=}"
+        )
         if (rval := self.search_cache.get(term)) is not None:
             return json.loads(rval)
         rval = wikipedia.search(term, results=n_results)
         self.search_cache[term] = json.dumps(rval)
         return rval
-
 
 
 def tool_search(tool_description: str):

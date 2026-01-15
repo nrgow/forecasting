@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: newstalk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${MLFLOW_POSTGRES_DB}
+      POSTGRES_USER: ${MLFLOW_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${MLFLOW_POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  mlflow:
+    build:
+      context: ./infra/mlflow
+      dockerfile: mlflow.dockerfile
+    container_name: newstalk-mlflow
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    command: >
+      sh -c "mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://$${MLFLOW_POSTGRES_USER}:$${MLFLOW_POSTGRES_PASSWORD}@postgres:5432/$${MLFLOW_POSTGRES_DB}
+      --default-artifact-root $${MLFLOW_DEFAULT_ARTIFACT_ROOT}"
+    ports:
+      - "5000:5000"
+    environment:
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
+      AWS_DEFAULT_REGION: us-east-1
+      MLFLOW_S3_ENDPOINT_URL: http://rustfs:9000
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: s3://mlflow/artifacts
+  rustfs:
+    image: rustfs/rustfs:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+    volumes:
+      - rustfs_data:/data
+
+volumes:
+  postgres_data:
+  rustfs_data:

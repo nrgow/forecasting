@@ -83,9 +83,7 @@ def generate_event_table(
     ) -> float:
         """Compute a composite ranking score from liquidity, volume, and theme probability."""
         activity = (
-            math.log1p(total_liq)
-            + math.log1p(total_vol)
-            + math.log1p(total_vol_1wk)
+            math.log1p(total_liq) + math.log1p(total_vol) + math.log1p(total_vol_1wk)
         )
         return geopol_prob * activity
 
@@ -100,17 +98,36 @@ def generate_event_table(
     with output_path.open("w") as o:
         for event_group in events_groups:
             event_group_open_markets = list(event_group.open_markets())
-            total_liq = sum([m.liquidity for m in event_group_open_markets if m.liquidity is not None], 0)
-            total_vol = sum([m.volume for m in event_group_open_markets if m.volume is not None], 0)
+            total_liq = sum(
+                [
+                    m.liquidity
+                    for m in event_group_open_markets
+                    if m.liquidity is not None
+                ],
+                0,
+            )
+            total_vol = sum(
+                [m.volume for m in event_group_open_markets if m.volume is not None], 0
+            )
             total_vol_1wk = sum(
-                [m.volume_1wk for m in event_group_open_markets if m.volume_1wk is not None],
+                [
+                    m.volume_1wk
+                    for m in event_group_open_markets
+                    if m.volume_1wk is not None
+                ],
                 0,
             )
             num_open_markets = len(event_group_open_markets)
             event_urls = "\n".join([e.url() for e in event_group.events])
             event_names = "\n".join([e.title for e in event_group.events])
-            yes_probs: list[float] = list(filter(None, [m.yes_probability() for m in event_group_open_markets]))
-            max_uncertainty = max(4*yes_prob*(1 - yes_prob) for yes_prob in yes_probs) if yes_probs else None
+            yes_probs: list[float] = list(
+                filter(None, [m.yes_probability() for m in event_group_open_markets])
+            )
+            max_uncertainty = (
+                max(4 * yes_prob * (1 - yes_prob) for yes_prob in yes_probs)
+                if yes_probs
+                else None
+            )
             event_group_id = event_group.id()
             event_group_geopol_prob = event_geopol_prob[event_group_id]
             composite_score = composite_event_group_score(
@@ -134,7 +151,7 @@ def generate_event_table(
                         "composite_score": composite_score,
                     }
                 ),
-                file=o
+                file=o,
             )
     logging.info(f"Wrote {output_path}")
 
@@ -144,7 +161,8 @@ def download_news_past_week(news_base_path):
     for _ in NewsDownloader(news_base_path).download_past_week():
         pass
 
+
 def download_news_past_day(news_base_path):
     """Download the past week of news into the base path."""
     for _ in NewsDownloader(news_base_path).download_past_day():
-        pass    
+        pass

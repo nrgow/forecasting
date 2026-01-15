@@ -10,6 +10,7 @@ import bm25s
 import dspy
 
 from .news_relevance_dspy import DeepSearchRelevantArticles
+from ..mlflow_tracing import configure_dspy_autolog
 
 if TYPE_CHECKING:
     from .simulation_pipeline import NewsArticle
@@ -30,7 +31,9 @@ class BM25NewsIndex:
         started_at = time.perf_counter()
         self.article_by_id = {article.article_id: article for article in self.articles}
         corpus = [article.prompt_text() for article in self.articles]
-        tokenized = bm25s.tokenize(corpus, return_ids=True, show_progress=self.show_progress)
+        tokenized = bm25s.tokenize(
+            corpus, return_ids=True, show_progress=self.show_progress
+        )
         self.retriever = bm25s.BM25(corpus=self.articles)
         self.retriever.index(tokenized, show_progress=self.show_progress)
         elapsed = time.perf_counter() - started_at
@@ -106,7 +109,9 @@ class BM25SearchTool:
 
     def collected_articles(self) -> list["NewsArticle"]:
         """Return unique candidate articles collected during searches."""
-        return [self.index.article_for_id(article_id) for article_id in self.candidate_ids]
+        return [
+            self.index.article_for_id(article_id) for article_id in self.candidate_ids
+        ]
 
 
 class DeepSearchAgent(dspy.Module):
@@ -118,6 +123,7 @@ class DeepSearchAgent(dspy.Module):
         self.model = model
         self.search_tool = search_tool
         self.max_iters = max_iters
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(model))
         self.module = dspy.ReAct(
             DeepSearchRelevantArticles,
@@ -132,6 +138,7 @@ class DeepSearchAgent(dspy.Module):
         max_results: int,
     ) -> dspy.Prediction:
         """Run the agent and return the raw DSPy prediction."""
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(self.model))
         return self.module(
             event_group_prompt=event_group_prompt,

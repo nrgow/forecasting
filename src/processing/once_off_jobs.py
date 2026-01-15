@@ -12,6 +12,7 @@ from ..simulation.simulation_pipeline import (
     DenseNewsIndex,
     PresentTimelineService,
     RelevanceJudgmentService,
+    RerankerRelevanceService,
     apply_semantic_deduplication,
     apply_zero_shot_filter,
     iter_news_articles,
@@ -75,6 +76,7 @@ def run_relevance_backfill_for_event_group(
     events_path: Path,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = True,
+    use_reranker: bool = False,
     luxical_model_path: str | None = None,
     luxical_model_id: str | None = "DatologyAI/luxical-one",
     luxical_model_filename: str | None = "luxical_one_rc4.npz",
@@ -83,6 +85,12 @@ def run_relevance_backfill_for_event_group(
     lazy_max_iters: int = 6,
     lazy_max_results: int = 50,
     lazy_dedup_similarity_threshold: float = 0.97,
+    reranker_model_name: str = "Qwen/Qwen3-Reranker-0.6B",
+    reranker_backend: str = "auto",
+    reranker_instruction: str | None = None,
+    reranker_max_length: int = 8192,
+    reranker_batch_size: int = 8,
+    reranker_min_score: float = 0.5,
     zero_shot_min_probability: float = 0.5,
     zero_shot_class_name: str = "international politics geopolitics world financial markets",
     dedup_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
@@ -92,13 +100,17 @@ def run_relevance_backfill_for_event_group(
 ) -> dict:
     """Run relevance judgments for a single event group with a custom lookback window."""
     storage = SimulationStorage(storage_dir)
-    run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
     logging.info(
         "Once-off relevance backfill starting event_group_id=%s run_id=%s",
         event_group_id,
         run_id,
     )
+    if use_reranker and reranker_instruction is None:
+        reranker_instruction = "Given an event description, determine whether the news article is relevant."
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     if event_group_id not in active_event_group_ids:
         raise ValueError(
@@ -130,7 +142,9 @@ def run_relevance_backfill_for_event_group(
             event_group_id,
         )
         if luxical_model_path is None and luxical_model_id is None:
-            raise ValueError("luxical_model_path or luxical_model_id is required for dense retrieval.")
+            raise ValueError(
+                "luxical_model_path or luxical_model_id is required for dense retrieval."
+            )
         embedder, resolved_model_path = load_luxical_embedder(
             luxical_model_path,
             luxical_model_id,
@@ -191,49 +205,89 @@ def run_relevance_backfill_for_event_group(
             event_group_id,
         )
         zero_shot_started_at = time.perf_counter()
-        articles = apply_zero_shot_filter(
-            articles=articles,
-            storage=storage,
-            run_id=run_id,
-            class_name=zero_shot_class_name,
-            min_probability=zero_shot_min_probability,
-        )
-        zero_shot_elapsed = time.perf_counter() - zero_shot_started_at
-        logging.info(
-            "Once-off relevance backfill zero-shot completed seconds=%.2f articles=%s",
-            zero_shot_elapsed,
-            len(articles),
-        )
-        dedup_started_at = time.perf_counter()
-        dedup_clusters = apply_semantic_deduplication(
-            articles=articles,
-            model_name=dedup_model_name,
-            similarity_threshold=dedup_similarity_threshold,
-            batch_size=dedup_batch_size,
-        )
-        dedup_elapsed = time.perf_counter() - dedup_started_at
-        logging.info(
-            "Once-off relevance backfill dedup completed seconds=%.2f clusters=%s",
-            dedup_elapsed,
-            len(dedup_clusters),
-        )
-        dedup_ratio = len(dedup_clusters) / len(articles) if articles else 0.0
-        relevance_service = RelevanceJudgmentService(
-            storage=storage,
-            relevance_model=relevance_model,
-            batch_size=batch_size,
-        )
-        relevance_started_at = time.perf_counter()
-        summaries = relevance_service.process([event_group], dedup_clusters, run_id)
-        relevance_elapsed = time.perf_counter() - relevance_started_at
-        articles_considered = len(articles)
-        clusters_considered = len(dedup_clusters)
-        logging.info(
-            "Once-off relevance backfill eager completed seconds=%.2f articles=%s clusters=%s",
-            relevance_elapsed,
-            articles_considered,
-            clusters_considered,
-        )
+        if use_reranker:
+            logging.info(
+                "Once-off relevance backfill reranker starting event_group_id=%s reranker_model_name=%s",
+                event_group_id,
+                reranker_model_name,
+            )
+            articles = apply_zero_shot_filter(
+                articles=articles,
+                storage=storage,
+                run_id=run_id,
+                class_name=zero_shot_class_name,
+                min_probability=zero_shot_min_probability,
+            )
+            zero_shot_elapsed = time.perf_counter() - zero_shot_started_at
+            logging.info(
+                "Once-off relevance backfill zero-shot completed seconds=%.2f articles=%s",
+                zero_shot_elapsed,
+                len(articles),
+            )
+            relevance_service = RerankerRelevanceService(
+                storage=storage,
+                model_name=reranker_model_name,
+                backend=reranker_backend,
+                instruction=reranker_instruction,
+                max_length=reranker_max_length,
+                batch_size=reranker_batch_size,
+                min_score=reranker_min_score,
+            )
+            relevance_started_at = time.perf_counter()
+            summaries = relevance_service.process([event_group], articles, run_id)
+            relevance_elapsed = time.perf_counter() - relevance_started_at
+            articles_considered = len(articles)
+            clusters_considered = None
+            dedup_ratio = None
+            logging.info(
+                "Once-off relevance backfill reranker completed seconds=%.2f articles=%s",
+                relevance_elapsed,
+                articles_considered,
+            )
+        else:
+            articles = apply_zero_shot_filter(
+                articles=articles,
+                storage=storage,
+                run_id=run_id,
+                class_name=zero_shot_class_name,
+                min_probability=zero_shot_min_probability,
+            )
+            zero_shot_elapsed = time.perf_counter() - zero_shot_started_at
+            logging.info(
+                "Once-off relevance backfill zero-shot completed seconds=%.2f articles=%s",
+                zero_shot_elapsed,
+                len(articles),
+            )
+            dedup_started_at = time.perf_counter()
+            dedup_clusters = apply_semantic_deduplication(
+                articles=articles,
+                model_name=dedup_model_name,
+                similarity_threshold=dedup_similarity_threshold,
+                batch_size=dedup_batch_size,
+            )
+            dedup_elapsed = time.perf_counter() - dedup_started_at
+            logging.info(
+                "Once-off relevance backfill dedup completed seconds=%.2f clusters=%s",
+                dedup_elapsed,
+                len(dedup_clusters),
+            )
+            dedup_ratio = len(dedup_clusters) / len(articles) if articles else 0.0
+            relevance_service = RelevanceJudgmentService(
+                storage=storage,
+                relevance_model=relevance_model,
+                batch_size=batch_size,
+            )
+            relevance_started_at = time.perf_counter()
+            summaries = relevance_service.process([event_group], dedup_clusters, run_id)
+            relevance_elapsed = time.perf_counter() - relevance_started_at
+            articles_considered = len(articles)
+            clusters_considered = len(dedup_clusters)
+            logging.info(
+                "Once-off relevance backfill eager completed seconds=%.2f articles=%s clusters=%s",
+                relevance_elapsed,
+                articles_considered,
+                clusters_considered,
+            )
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
     run_record = {
@@ -249,19 +303,34 @@ def run_relevance_backfill_for_event_group(
         "event_group_summaries": summaries,
         "relevance_model": relevance_model,
         "retrieval_strategy": "lazy" if use_lazy_retriever else "eager",
+        "relevance_mode": (
+            "lazy"
+            if use_lazy_retriever
+            else "eager_reranker" if use_reranker else "eager_llm"
+        ),
         "bm25_indexed_articles": len(articles) if use_lazy_retriever else None,
         "dense_indexed_articles": len(articles) if use_lazy_retriever else None,
         "bm25_candidates": articles_considered if use_lazy_retriever else None,
         "lazy_search_top_k": lazy_search_top_k if use_lazy_retriever else None,
         "lazy_max_iters": lazy_max_iters if use_lazy_retriever else None,
         "lazy_max_results": lazy_max_results if use_lazy_retriever else None,
-        "zero_shot_class_name": zero_shot_class_name if not use_lazy_retriever else None,
-        "zero_shot_min_probability": zero_shot_min_probability if not use_lazy_retriever else None,
+        "zero_shot_class_name": (
+            zero_shot_class_name if not use_lazy_retriever else None
+        ),
+        "zero_shot_min_probability": (
+            zero_shot_min_probability if not use_lazy_retriever else None
+        ),
         "dedup_model_name": dedup_model_name if not use_lazy_retriever else None,
-        "dedup_similarity_threshold": dedup_similarity_threshold
-        if not use_lazy_retriever
-        else None,
+        "dedup_similarity_threshold": (
+            dedup_similarity_threshold if not use_lazy_retriever else None
+        ),
         "dedup_batch_size": dedup_batch_size if not use_lazy_retriever else None,
+        "reranker_model_name": reranker_model_name if use_reranker else None,
+        "reranker_backend": reranker_backend if use_reranker else None,
+        "reranker_instruction": reranker_instruction if use_reranker else None,
+        "reranker_max_length": reranker_max_length if use_reranker else None,
+        "reranker_batch_size": reranker_batch_size if use_reranker else None,
+        "reranker_min_score": reranker_min_score if use_reranker else None,
     }
     storage.append_run_metadata(run_record)
     logging.info(
@@ -284,6 +353,7 @@ def run_russia_ukraine_ceasefire_backfill(
     max_events: int | None = None,
     relevance_model: str = "openrouter/x-ai/grok-4.1-fast",
     use_lazy_retriever: bool = True,
+    use_reranker: bool = False,
     luxical_model_path: str | None = None,
     luxical_model_id: str | None = "DatologyAI/luxical-one",
     luxical_model_filename: str | None = "luxical_one_rc4.npz",
@@ -337,6 +407,7 @@ def run_russia_ukraine_ceasefire_backfill(
         events_path=events_path,
         relevance_model=relevance_model,
         use_lazy_retriever=use_lazy_retriever,
+        use_reranker=use_reranker,
         luxical_model_path=luxical_model_path,
         luxical_model_id=luxical_model_id,
         luxical_model_filename=luxical_model_filename,

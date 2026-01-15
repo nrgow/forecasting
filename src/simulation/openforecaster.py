@@ -71,12 +71,14 @@ class ProbabilityTagStoppingCriteria(StoppingCriteria):
         self.generated_text = ""
         self.last_length = start_length
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: dict) -> bool:
+    def __call__(
+        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: dict
+    ) -> bool:
         """Return True when the closing probability tag appears."""
         current_length = input_ids.shape[1]
         if current_length <= self.last_length:
             return False
-        new_ids = input_ids[0, self.last_length:current_length]
+        new_ids = input_ids[0, self.last_length : current_length]
         self.generated_text += self.tokenizer.decode(new_ids, skip_special_tokens=True)
         self.last_length = current_length
         return "</probability>" in self.generated_text
@@ -105,7 +107,9 @@ def extract_generated_only(prompt: str, generated_text: str) -> str:
 
 def format_recent_news(records: list[dict], max_news: int) -> str:
     """Format relevant news records into a readable summary list."""
-    records = sorted(records, key=lambda item: item["article_published_at"], reverse=True)
+    records = sorted(
+        records, key=lambda item: item["article_published_at"], reverse=True
+    )
     items = []
     for idx, record in enumerate(records[:max_news], start=1):
         items.append(
@@ -161,7 +165,7 @@ def run_openforecaster_pipeline(
     events_path: Path,
     storage_dir: Path,
     max_news: int = 8,
-    max_new_tokens: int = 8192*4,
+    max_new_tokens: int = 8192 * 4,
     temperature: float = 0.6,
     model_name: str = "nikhilchandak/OpenForecaster-8B",
 ) -> dict:
@@ -172,7 +176,9 @@ def run_openforecaster_pipeline(
     logging.info("OpenForecaster run %s starting", run_id)
     storage = SimulationStorage(storage_dir)
     events = Events.from_file(events_path)
-    event_group_index = {group.id(): group for group in events.group_by_title_template()}
+    event_group_index = {
+        group.id(): group for group in events.group_by_title_template()
+    }
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     present_timeline_index = storage.load_present_timeline_index()
     client = OpenForecasterClient(
@@ -189,7 +195,9 @@ def run_openforecaster_pipeline(
             event_group.template_title,
         )
         open_markets = [
-            market for market in event_group.open_markets() if market.active and not market.closed
+            market
+            for market in event_group.open_markets()
+            if market.active and not market.closed
         ]
         present_record = present_timeline_index[event_group_id]
         present_timeline = present_record["timeline"]["merged"]["merged_timeline"]
@@ -198,7 +206,11 @@ def run_openforecaster_pipeline(
             if market.end_date is None:
                 raise ValueError(f"Open market {market.id} missing end_date.")
             prompt = build_openforecaster_prompt(
-                market={"id": market.id, "question": market.question, "end_date": market.end_date},
+                market={
+                    "id": market.id,
+                    "question": market.question,
+                    "end_date": market.end_date,
+                },
                 present_timeline=present_timeline,
                 relevant_news=relevant_news,
                 max_news=max_news,
@@ -235,7 +247,5 @@ def run_openforecaster_pipeline(
             }
             storage.append_openforecaster_analysis(record)
             generated += 1
-    logging.info(
-        "OpenForecaster run %s completed generated=%s", run_id, generated
-    )
+    logging.info("OpenForecaster run %s completed generated=%s", run_id, generated)
     return {"run_id": run_id, "generated": generated}

@@ -18,10 +18,16 @@ from huggingface_hub import hf_hub_download
 from luxical.embedder import Embedder
 from mxbai_rerank import MxbaiRerankV2
 from sentence_transformers import SentenceTransformer
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+)
 
 from ..prediction_markets import EventGroup, Events, parse_open_market_end_date
 from ..news_enrichment import ZeroShotClassifier
+from ..mlflow_tracing import configure_dspy_autolog, log_inference_call
 from .generate_future_timeline import run_model, sanitize_future_timeline_topic
 from .generate_present_timeline import generate_present_timeline
 from .bm25_retriever import BM25NewsIndex, BM25SearchTool
@@ -41,10 +47,7 @@ from .news_relevance_dspy import SelectRelevantArticles
 from .storage import SimulationStorage
 
 DEEP_SEARCH_TRACE_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "data"
-    / "agent_trace"
-    / "deep_news_relevance"
+    Path(__file__).resolve().parents[2] / "data" / "agent_trace" / "deep_news_relevance"
 )
 
 
@@ -112,8 +115,12 @@ class SemanticDeduplicator:
             if assigned[idx]:
                 continue
             similarities = embeddings @ embeddings[idx]
-            members_idx = np.where(similarities >= self.similarity_threshold)[0].tolist()
-            members_idx = [member_idx for member_idx in members_idx if not assigned[member_idx]]
+            members_idx = np.where(similarities >= self.similarity_threshold)[
+                0
+            ].tolist()
+            members_idx = [
+                member_idx for member_idx in members_idx if not assigned[member_idx]
+            ]
             for member_idx in members_idx:
                 assigned[member_idx] = True
             representative_idx = max(
@@ -248,7 +255,9 @@ def _cluster_semantic(
             continue
         similarities = embeddings @ embeddings[idx]
         members_idx = np.where(similarities >= similarity_threshold)[0].tolist()
-        members_idx = [member_idx for member_idx in members_idx if not assigned[member_idx]]
+        members_idx = [
+            member_idx for member_idx in members_idx if not assigned[member_idx]
+        ]
         for member_idx in members_idx:
             assigned[member_idx] = True
         representative_idx = max(
@@ -280,7 +289,9 @@ def deduplicate_articles_for_retrieval(
     )
 
     exact_started_at = time.perf_counter()
-    exact_unique = _dedup_by_key(ordered_articles, lambda article: article.prompt_text())
+    exact_unique = _dedup_by_key(
+        ordered_articles, lambda article: article.prompt_text()
+    )
     exact_elapsed = time.perf_counter() - exact_started_at
     logging.info(
         "Retrieval deduplication exact completed kept=%s removed=%s seconds=%.2f",
@@ -323,11 +334,13 @@ class NewsRelevanceJudge:
     def __init__(self, model: str) -> None:
         """Configure the LLM model for relevance selection."""
         self.model = model
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(model))
         self.module = dspy.Predict(SelectRelevantArticles)
 
     def select_relevant(self, query: str, articles: list[str]) -> list[str]:
         """Return the subset of article strings judged relevant to the query."""
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(self.model))
         result = self.module(query_or_article=query, articles=articles)
         if result is None:
@@ -359,9 +372,7 @@ class NewsRelevanceReranker:
         """Initialize the reranker with prompt and batching settings."""
         self.model_name = model_name
         if instruction is None:
-            instruction = (
-                "Given an event description, determine whether the news article is relevant."
-            )
+            instruction = "Given an event description, determine whether the news article is relevant."
         self.instruction = instruction
         self.max_length = max_length
         self.batch_size = batch_size
@@ -384,20 +395,20 @@ class NewsRelevanceReranker:
         self.prefix = (
             "<|im_start|>system\n"
             "Judge whether the Document meets the requirements based on the Query and the Instruct "
-            "provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n"
+            'provided. Note that the answer can only be "yes" or "no".<|im_end|>\n'
             "<|im_start|>user\n"
         )
-        self.suffix = (
-            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        self.suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        self.prefix_tokens = self.tokenizer.encode(
+            self.prefix, add_special_tokens=False
         )
-        self.prefix_tokens = self.tokenizer.encode(self.prefix, add_special_tokens=False)
-        self.suffix_tokens = self.tokenizer.encode(self.suffix, add_special_tokens=False)
+        self.suffix_tokens = self.tokenizer.encode(
+            self.suffix, add_special_tokens=False
+        )
 
     def _format_instruction(self, query: str, doc: str) -> str:
         """Return a formatted reranker prompt for a query/document pair."""
-        return (
-            f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {doc}"
-        )
+        return f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {doc}"
 
     def _process_inputs(self, pairs: list[str]) -> dict[str, torch.Tensor]:
         """Tokenize and pad reranker inputs with prefix and suffix tokens."""
@@ -406,10 +417,14 @@ class NewsRelevanceReranker:
             padding=False,
             truncation="longest_first",
             return_attention_mask=False,
-            max_length=self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens),
+            max_length=self.max_length
+            - len(self.prefix_tokens)
+            - len(self.suffix_tokens),
         )
         for idx, token_ids in enumerate(inputs["input_ids"]):
-            inputs["input_ids"][idx] = self.prefix_tokens + token_ids + self.suffix_tokens
+            inputs["input_ids"][idx] = (
+                self.prefix_tokens + token_ids + self.suffix_tokens
+            )
         inputs = self.tokenizer.pad(
             inputs,
             padding=True,
@@ -571,6 +586,7 @@ class FutureTimelineEstimator:
         contexts: list[str],
         current_date: str,
         market_specs: list[dict],
+        trace_metadata: dict,
     ) -> dict:
         """Generate future timeline rollouts and market-level probabilities."""
         results = list(
@@ -583,6 +599,7 @@ class FutureTimelineEstimator:
                     market_specs=market_specs,
                     temps=self.temps,
                     rollouts_per_temp=self.rollouts_per_temp,
+                    trace_metadata=trace_metadata,
                 )
                 for model in self.models
             )
@@ -595,9 +612,10 @@ def recurse_types(js):
     if isinstance(js, list):
         return [recurse_types(el) for el in js]
     if isinstance(js, dict):
-        return {k: recurse_types(v) for k,v in js.items()}
+        return {k: recurse_types(v) for k, v in js.items()}
     else:
         return type(js)
+
 
 class PresentTimelineService:
     """Generate and store present timelines for active event groups."""
@@ -613,12 +631,15 @@ class PresentTimelineService:
         target_timeline_chars: int | None,
         min_events: int | None,
         max_events: int | None,
+        run_id: str,
     ) -> list[dict]:
         """Generate present timelines if missing or forced."""
         existing = self.storage.load_present_timeline_index()
         generated = []
         for event_group in event_groups:
-            logging.info("Present timeline check for event_group_id=%s", event_group.id())
+            logging.info(
+                "Present timeline check for event_group_id=%s", event_group.id()
+            )
             if event_group.id() in existing and not force:
                 logging.info(
                     "Present timeline exists for event_group_id=%s; skipping",
@@ -631,11 +652,15 @@ class PresentTimelineService:
             )
             output = generate_present_timeline(
                 event_group.template_title,
-                target_timeline_chars=target_timeline_chars
-                if target_timeline_chars is not None
-                else 24000,
+                target_timeline_chars=(
+                    target_timeline_chars
+                    if target_timeline_chars is not None
+                    else 24000
+                ),
                 min_events=min_events if min_events is not None else 18,
                 max_events=max_events if max_events is not None else 28,
+                event_group_id=event_group.id(),
+                run_id=run_id,
             )
             record = {
                 "event_group_id": event_group.id(),
@@ -643,7 +668,7 @@ class PresentTimelineService:
                 "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "timeline": output,
             }
-            logging.info(f"{recurse_types(output)=}")            
+            logging.info(f"{recurse_types(output)=}")
             self.storage.append_present_timeline(record)
             logging.info(
                 "Stored present timeline for event_group_id=%s",
@@ -718,6 +743,25 @@ class RelevanceJudgmentService:
                 relevant_texts = set(self.judge.select_relevant(query, batch_texts))
                 elapsed = time.perf_counter() - started_at
                 items_per_sec = len(batch_list) / elapsed
+                log_inference_call(
+                    name="relevance.select_relevant",
+                    model=self.judge.model,
+                    inputs={
+                        "query": query,
+                        "articles": batch_texts,
+                    },
+                    outputs={"relevant_articles": list(relevant_texts)},
+                    metadata={
+                        "pipeline_run_id": run_id,
+                        "event_group_id": event_group_id,
+                        "stage": "relevance_select",
+                        "batch_index": batch_index,
+                        "news_ids": [
+                            cluster.representative.article_id for cluster in batch_list
+                        ],
+                    },
+                    duration_seconds=elapsed,
+                )
                 relevant_in_batch = 0
                 for cluster in batch_list:
                     relevant = cluster.representative.prompt_text() in relevant_texts
@@ -859,6 +903,29 @@ class RerankerRelevanceService:
             scores = self.reranker.score(query, docs)
             elapsed = time.perf_counter() - started_at
             items_per_sec = len(candidates) / elapsed
+            log_inference_call(
+                name="relevance.rerank",
+                model=self.reranker.model_name,
+                inputs={
+                    "query": query,
+                    "documents": docs,
+                },
+                outputs={
+                    "scores": [
+                        {"article_id": article.article_id, "score": score}
+                        for article, score in zip(candidates, scores)
+                    ],
+                },
+                metadata={
+                    "pipeline_run_id": run_id,
+                    "event_group_id": event_group_id,
+                    "stage": "reranker",
+                    "reranker_backend": self.backend,
+                    "reranker_instruction": self.reranker.instruction,
+                    "news_ids": [article.article_id for article in candidates],
+                },
+                duration_seconds=elapsed,
+            )
             relevant_articles = 0
             for article, score in zip(candidates, scores):
                 relevant = score >= self.min_score
@@ -977,6 +1044,29 @@ class AgenticRelevanceService:
             )
             relevant_article_ids = agent.extract_relevant_ids(prediction)
             raw_relevant_article_ids = list(relevant_article_ids)
+            search_elapsed = time.perf_counter() - search_started_at
+            log_inference_call(
+                name="relevance.deep_search",
+                model=self.relevance_model,
+                inputs={
+                    "event_group_prompt": event_prompt,
+                    "present_timeline": present_timeline,
+                    "max_results": self.max_results,
+                    "search_top_k": self.search_top_k,
+                    "max_iters": self.max_iters,
+                },
+                outputs={
+                    "prediction": serialize_prediction(prediction),
+                    "relevant_article_ids": raw_relevant_article_ids,
+                },
+                metadata={
+                    "pipeline_run_id": run_id,
+                    "event_group_id": event_group_id,
+                    "stage": "deep_search",
+                    "news_ids": raw_relevant_article_ids,
+                },
+                duration_seconds=search_elapsed,
+            )
             candidate_by_id: dict[str, NewsArticle] = {}
             for article in bm25_tool.collected_articles():
                 candidate_by_id[article.article_id] = article
@@ -984,7 +1074,7 @@ class AgenticRelevanceService:
                 candidate_by_id[article.article_id] = article
             candidate_articles = list(candidate_by_id.values())
             candidate_ids = set(candidate_by_id.keys())
-            elapsed = time.perf_counter() - search_started_at
+            elapsed = search_elapsed
             logging.info(
                 "Deep search agent completed event_group_id=%s seconds=%.2f relevant_ids=%s bm25_queries=%s dense_queries=%s candidates=%s",
                 event_group_id,
@@ -994,7 +1084,11 @@ class AgenticRelevanceService:
                 len(dense_tool.query_log),
                 len(candidate_articles),
             )
-            unknown_ids = [article_id for article_id in relevant_article_ids if article_id not in candidate_ids]
+            unknown_ids = [
+                article_id
+                for article_id in relevant_article_ids
+                if article_id not in candidate_ids
+            ]
             if unknown_ids:
                 logging.warning(
                     "Deep search agent returned unknown article ids event_group_id=%s unknown_ids=%s",
@@ -1002,7 +1096,9 @@ class AgenticRelevanceService:
                     unknown_ids,
                 )
                 relevant_article_ids = [
-                    article_id for article_id in relevant_article_ids if article_id in candidate_ids
+                    article_id
+                    for article_id in relevant_article_ids
+                    if article_id in candidate_ids
                 ]
             tool_calls = sorted(
                 bm25_tool.query_log + dense_tool.query_log,
@@ -1135,10 +1231,11 @@ class FutureTimelineService:
         force_without_relevance: bool = False,
     ) -> list[dict]:
         """Generate future timelines for event groups with relevant articles."""
-        relevance_records = self.storage.load_relevance_records(relevance_run_id)
+        relevance_records = self.storage.load_relevance_records_all()
         grouped_records: dict[str, list[dict]] = {}
         for record in relevance_records:
             grouped_records.setdefault(record["event_group_id"], []).append(record)
+        present_timeline_index = self.storage.load_present_timeline_index()
 
         summaries = []
         for event_group in event_groups:
@@ -1150,7 +1247,9 @@ class FutureTimelineService:
                         event_group_id,
                     )
                     continue
-                records = self.storage.load_latest_relevance_records_for_group(event_group_id)
+                records = self.storage.load_latest_relevance_records_for_group(
+                    event_group_id
+                )
                 if records:
                     logging.info(
                         "Future timeline using prior relevance records event_group_id=%s records=%s",
@@ -1176,14 +1275,36 @@ class FutureTimelineService:
                     "Future timeline forcing event_group_id=%s; no relevant records",
                     event_group_id,
                 )
+            relevant_records = deduplicate_relevant_records(relevant_records)
+            present_record = present_timeline_index[event_group_id]
+            present_timeline = build_present_timeline_context(present_record)
+            present_context = format_present_timeline_context(present_timeline)
+            mixbread_records = [
+                record
+                for record in relevant_records
+                if is_mixbread_reranker_record(record)
+            ]
+            selected_records = select_recent_news_records(
+                mixbread_records,
+                present_record,
+            )
+            recent_news_context = format_recent_news_context(selected_records)
             logging.info(
                 "Future timeline generating event_group_id=%s relevant_records=%s",
                 event_group_id,
                 len(relevant_records),
             )
-            scenario = build_future_timeline_prompt(event_group, self.estimator.models[0])
-            contexts = list(
-                islice((prompt_text_from_record(record) for record in relevant_records), 50)
+            scenario = build_future_timeline_prompt(
+                event_group, self.estimator.models[0]
+            )
+            contexts = [present_context]
+            if recent_news_context:
+                contexts.append(recent_news_context)
+            logging.info(
+                "Future timeline contexts ready event_group_id=%s present_timeline_chars=%s recent_news=%s",
+                event_group_id,
+                len(present_timeline),
+                len(selected_records),
             )
             market_specs = build_market_implication_specs(event_group)
             if not market_specs:
@@ -1192,11 +1313,24 @@ class FutureTimelineService:
                     event_group_id,
                 )
                 continue
+            generation_started_at = time.perf_counter()
             timeline_output = self.estimator.generate(
                 scenario=scenario,
                 contexts=contexts,
                 current_date=dt.date.today().isoformat(),
                 market_specs=market_specs,
+                trace_metadata={
+                    "pipeline_run_id": run_id,
+                    "event_group_id": event_group_id,
+                    "relevance_run_id": relevance_run_id,
+                },
+            )
+            generation_elapsed = time.perf_counter() - generation_started_at
+            logging.info(
+                "Future timeline generation completed event_group_id=%s seconds=%.2f rollouts=%s",
+                event_group_id,
+                generation_elapsed,
+                len(timeline_output["results"]),
             )
             generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
             timeline_record = {
@@ -1254,7 +1388,9 @@ def load_event_group_index(events_path: Path) -> dict[str, EventGroup]:
 
 def build_event_group_prompt(event_group: EventGroup) -> str:
     """Build a prompt string describing an event group."""
-    descriptions = [event.description for event in event_group.events if event.description]
+    descriptions = [
+        event.description for event in event_group.events if event.description
+    ]
     unique_descriptions = list(mit.unique_everseen(descriptions))
     description_text = "\n\n".join(unique_descriptions)
     return f"{event_group.template_title}\n\n{description_text}".strip()
@@ -1268,6 +1404,292 @@ def build_present_timeline_context(record: dict) -> str:
 def prompt_text_from_record(record: dict) -> str:
     """Return prompt text for a relevance record."""
     return f"{record['article_title']}\n\n{record['article_desc']}".strip()
+
+
+def format_present_timeline_context(present_timeline: str) -> str:
+    """Return a present timeline context block for future timeline generation."""
+    return present_timeline.strip()
+
+
+def is_mixbread_reranker_record(record: dict) -> bool:
+    """Return whether a relevance record came from the mixbread-ai reranker."""
+    model_name = record["model"]
+    return "mixedbread-ai/" in model_name or "mxbai-rerank" in model_name
+
+
+def parse_present_timeline_generated_at(record: dict) -> dt.datetime:
+    """Return the present timeline generation timestamp."""
+    return dt.datetime.fromisoformat(record["generated_at"])
+
+
+def select_recent_news_records(
+    records: list[dict],
+    present_record: dict,
+    max_items: int = 50,
+    bucket_count: int = 8,
+) -> list[dict]:
+    """Select a diverse, high-relevance recent news set for timeline context."""
+    selection_started_at = time.perf_counter()
+    present_generated_at = parse_present_timeline_generated_at(present_record)
+    logging.info(
+        "Recent news selection starting event_group_id=%s total_records=%s window_start=%s",
+        present_record["event_group_id"],
+        len(records),
+        present_generated_at.isoformat(),
+    )
+    recent_records = [
+        record
+        for record in records
+        if parse_news_datetime(record["article_published_at"]) >= present_generated_at
+    ]
+    if not recent_records:
+        logging.info(
+            "Recent news selection empty event_group_id=%s total_records=%s",
+            present_record["event_group_id"],
+            len(records),
+        )
+        return []
+    sorted_records = sorted(
+        recent_records,
+        key=lambda record: parse_news_datetime(record["article_published_at"]),
+    )
+    earliest = parse_news_datetime(sorted_records[0]["article_published_at"])
+    latest = parse_news_datetime(sorted_records[-1]["article_published_at"])
+    total_seconds = (latest - earliest).total_seconds()
+    bucket_count = min(bucket_count, len(sorted_records))
+    buckets: list[list[dict]] = [[] for _ in range(bucket_count)]
+    for record in sorted_records:
+        published_at = parse_news_datetime(record["article_published_at"])
+        if bucket_count == 1 or total_seconds == 0:
+            bucket_index = 0
+        else:
+            position = (published_at - earliest).total_seconds() / total_seconds
+            bucket_index = min(int(position * bucket_count), bucket_count - 1)
+        buckets[bucket_index].append(record)
+    for bucket in buckets:
+        bucket.sort(
+            key=lambda record: (
+                record["reranker_score"],
+                record["article_published_at"],
+            ),
+            reverse=True,
+        )
+    selected: list[dict] = []
+    while len(selected) < max_items and any(buckets):
+        for bucket in buckets:
+            if len(selected) >= max_items:
+                break
+            if not bucket:
+                continue
+            selected.append(bucket.pop(0))
+    selection_elapsed = time.perf_counter() - selection_started_at
+    logging.info(
+        "Recent news selection completed event_group_id=%s total=%s recent=%s selected=%s buckets=%s seconds=%.2f",
+        present_record["event_group_id"],
+        len(records),
+        len(recent_records),
+        len(selected),
+        bucket_count,
+        selection_elapsed,
+    )
+    return selected
+
+
+def _load_relevant_dedup_embedder(
+    luxical_model_path: str | None,
+    luxical_model_id: str | None,
+    luxical_model_filename: str | None,
+) -> Embedder:
+    """Load and cache the Luxical embedder for relevant-news deduplication."""
+    embedder, _ = load_luxical_embedder(
+        luxical_model_path,
+        luxical_model_id,
+        luxical_model_filename,
+    )
+    return embedder
+
+
+@functools.lru_cache(maxsize=1)
+def _cached_relevant_dedup_embedder(
+    luxical_model_path: str | None,
+    luxical_model_id: str | None,
+    luxical_model_filename: str | None,
+) -> Embedder:
+    """Return a cached Luxical embedder for relevant-news deduplication."""
+    return _load_relevant_dedup_embedder(
+        luxical_model_path,
+        luxical_model_id,
+        luxical_model_filename,
+    )
+
+
+def deduplicate_relevant_records(
+    records: list[dict],
+    luxical_model_path: str | None = None,
+    luxical_model_id: str | None = "DatologyAI/luxical-one",
+    luxical_model_filename: str | None = "luxical_one_rc4.npz",
+    similarity_threshold: float = 0.92,
+) -> list[dict]:
+    """Return relevant news records deduplicated with the full pipeline."""
+    if not records:
+        return []
+    logging.info("Relevant news deduplication starting records=%s", len(records))
+    started_at = time.perf_counter()
+    embedder = _cached_relevant_dedup_embedder(
+        luxical_model_path,
+        luxical_model_id,
+        luxical_model_filename,
+    )
+    articles = [
+        NewsArticle(
+            article_id=record["article_id"],
+            url=record["article_url"],
+            title=record["article_title"],
+            desc=record["article_desc"],
+            published_at=parse_news_datetime(record["article_published_at"]),
+            domain=record["article_domain"],
+            outlet_name=record["article_outlet_name"],
+            lang=record["article_lang"],
+        )
+        for record in records
+    ]
+    unique_articles = deduplicate_articles_for_retrieval(
+        articles,
+        embedder,
+        similarity_threshold,
+    )
+    kept_ids = {article.article_id for article in unique_articles}
+    record_by_id: dict[str, dict] = {}
+    for record in records:
+        if record["article_id"] not in kept_ids:
+            continue
+        record_id = record["article_id"]
+        if record_id in record_by_id:
+            existing = record_by_id[record_id]
+            if parse_news_datetime(
+                record["article_published_at"]
+            ) > parse_news_datetime(existing["article_published_at"]):
+                record_by_id[record_id] = record
+        else:
+            record_by_id[record_id] = record
+    deduped = list(record_by_id.values())
+    elapsed = time.perf_counter() - started_at
+    logging.info(
+        "Relevant news deduplication completed kept=%s removed=%s seconds=%.2f",
+        len(deduped),
+        len(records) - len(deduped),
+        elapsed,
+    )
+    return deduped
+
+
+def format_recent_news_context(records: list[dict]) -> str:
+    """Return recent news formatted as YYYY-MM-DD headlines only."""
+    if not records:
+        return ""
+    sorted_records = sorted(
+        records,
+        key=lambda record: parse_news_datetime(record["article_published_at"]),
+    )
+    lines = ["Recent news:"]
+    for record in sorted_records:
+        published_at = (
+            parse_news_datetime(record["article_published_at"]).date().isoformat()
+        )
+        lines.append(f"- {published_at} - {record['article_title']}")
+    return "\n".join(lines)
+
+
+def build_future_timeline_llm_inputs(
+    active_event_groups_path: Path,
+    events_path: Path,
+    storage_dir: Path,
+    relevance_run_id: str | None = None,
+    force_without_relevance: bool = False,
+    max_recent_items: int = 50,
+    recent_bucket_count: int = 8,
+) -> list[dict]:
+    """Build JSON-serializable future timeline LLM inputs for active event groups."""
+    storage = SimulationStorage(storage_dir)
+    if relevance_run_id is None:
+        logging.info("Future timeline input preview using all relevance records")
+    else:
+        logging.info(
+            "Future timeline input preview relevance_run_id=%s", relevance_run_id
+        )
+    active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
+    event_group_index = load_event_group_index(events_path)
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
+    relevance_records = storage.load_relevance_records_all()
+    grouped_records: dict[str, list[dict]] = {}
+    for record in relevance_records:
+        grouped_records.setdefault(record["event_group_id"], []).append(record)
+    present_timeline_index = storage.load_present_timeline_index()
+    logging.info("Future timeline input preview event_groups=%s", len(event_groups))
+    results: list[dict] = []
+    for event_group in event_groups:
+        event_group_id = event_group.id()
+        record: dict = {
+            "event_group_id": event_group_id,
+            "event_group_title": event_group.template_title,
+        }
+        if relevance_run_id is not None:
+            record["relevance_run_id"] = relevance_run_id
+        if event_group_id not in grouped_records:
+            if not force_without_relevance:
+                record["will_generate"] = False
+                record["skip_reason"] = "no_relevance_records"
+                results.append(record)
+                continue
+            records = storage.load_latest_relevance_records_for_group(event_group_id)
+        else:
+            records = grouped_records[event_group_id]
+        relevant_records = [item for item in records if item["relevant"]]
+        if not relevant_records and not force_without_relevance:
+            record["will_generate"] = False
+            record["skip_reason"] = "no_relevant_records"
+            results.append(record)
+            continue
+        relevant_records = deduplicate_relevant_records(relevant_records)
+        market_specs = build_market_implication_specs(event_group)
+        if not market_specs:
+            record["will_generate"] = False
+            record["skip_reason"] = "no_open_markets"
+            results.append(record)
+            continue
+        present_record = present_timeline_index[event_group_id]
+        present_timeline = build_present_timeline_context(present_record)
+        present_context = format_present_timeline_context(present_timeline)
+        mixbread_records = [
+            item for item in relevant_records if is_mixbread_reranker_record(item)
+        ]
+        selected_records = select_recent_news_records(
+            mixbread_records,
+            present_record,
+            max_items=max_recent_items,
+            bucket_count=recent_bucket_count,
+        )
+        recent_news_context = format_recent_news_context(selected_records)
+        contexts = [present_context]
+        if recent_news_context:
+            contexts.append(recent_news_context)
+        record.update(
+            {
+                "will_generate": True,
+                "timeline_scenario": build_future_timeline_prompt(
+                    event_group, "preview"
+                ),
+                "contexts": contexts,
+                "current_date": dt.date.today().isoformat(),
+                "present_timeline_generated_at": present_record["generated_at"],
+                "recent_news_selected": len(selected_records),
+                "recent_news_candidate_count": len(mixbread_records),
+            }
+        )
+        results.append(record)
+    return results
 
 
 def serialize_prediction(prediction: dspy.Prediction) -> dict:
@@ -1287,7 +1709,9 @@ def serialize_prediction(prediction: dspy.Prediction) -> dict:
 
 def build_sanitized_future_topic(event_group: EventGroup, model: str) -> str:
     """Return a sanitized topic sentence for future timeline prompts."""
-    descriptions = [event.description for event in event_group.events if event.description]
+    descriptions = [
+        event.description for event in event_group.events if event.description
+    ]
     unique_descriptions = list(mit.unique_everseen(descriptions))
     return sanitize_future_timeline_topic(
         event_group.template_title, unique_descriptions, model
@@ -1339,7 +1763,9 @@ def aggregate_market_probabilities(
                 if implication["market_id"] == market["market_id"]:
                     choices.append(implication["implied_answer"])
                     break
-        probability = sum(int(choice) for choice in choices) / len(choices) if choices else None
+        probability = (
+            sum(int(choice) for choice in choices) / len(choices) if choices else None
+        )
         probabilities.append(
             {
                 "market_id": market["market_id"],
@@ -1435,6 +1861,34 @@ def apply_zero_shot_filter(
                 elapsed,
                 items_per_sec,
             )
+            log_inference_call(
+                name="zero_shot.classify",
+                model=classifier.model_name,
+                inputs={
+                    "class_name": class_name,
+                    "articles": [
+                        {
+                            "article_id": article.article_id,
+                            "title": article.title,
+                            "desc": article.desc,
+                        }
+                        for article in articles
+                    ],
+                },
+                outputs={
+                    "scores": [
+                        {"article_id": articles[idx].article_id, "score": score}
+                        for idx, score in zip(indices, scores)
+                    ]
+                },
+                metadata={
+                    "pipeline_run_id": run_id,
+                    "event_group_id": None,
+                    "stage": "zero_shot",
+                    "news_ids": [article.article_id for article in articles],
+                },
+                duration_seconds=elapsed,
+            )
     finally:
         classifier.shutdown()
     score_map = {idx: score for idx, score in zip(indices, scores)}
@@ -1490,13 +1944,17 @@ def run_present_timeline_pipeline(
 ) -> dict:
     """Run the present timeline generation pipeline."""
     storage = SimulationStorage(storage_dir)
-    run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
     logging.info("Present timeline run %s starting", run_id)
 
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
-    event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
     logging.info("Present timeline event_groups=%s", len(event_groups))
 
     present_service = PresentTimelineService(storage)
@@ -1506,6 +1964,7 @@ def run_present_timeline_pipeline(
         target_timeline_chars,
         min_events,
         max_events,
+        run_id,
     )
 
     run_finished_at = dt.datetime.now(dt.timezone.utc)
@@ -1604,16 +2063,16 @@ def run_relevance_pipeline(
 ) -> dict:
     """Run the relevance judgment pipeline for active event groups."""
     storage = SimulationStorage(storage_dir)
-    run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
     logging.info("Relevance run %s starting", run_id)
     relevance_mode = "lazy(agentic)" if use_lazy_retriever else "eager(classifier)"
     if use_reranker and not use_lazy_retriever:
         relevance_mode = "eager(reranker)"
         if reranker_instruction is None:
-            reranker_instruction = (
-                "Given an event description, determine whether the news article is relevant."
-            )
+            reranker_instruction = "Given an event description, determine whether the news article is relevant."
     logging.info(
         "Relevance module=%s",
         relevance_mode,
@@ -1629,7 +2088,9 @@ def run_relevance_pipeline(
 
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
-    event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
     logging.info("Relevance event_groups=%s", len(event_groups))
 
     news_paths = iter_news_paths(news_base_path, news_since)
@@ -1643,7 +2104,9 @@ def run_relevance_pipeline(
         )
         present_timeline_index = storage.load_present_timeline_index()
         if luxical_model_path is None and luxical_model_id is None:
-            raise ValueError("luxical_model_path or luxical_model_id is required for dense retrieval.")
+            raise ValueError(
+                "luxical_model_path or luxical_model_id is required for dense retrieval."
+            )
         embedder, resolved_model_path = load_luxical_embedder(
             luxical_model_path,
             luxical_model_id,
@@ -1799,10 +2262,16 @@ def run_relevance_pipeline(
         "lazy_search_top_k": lazy_search_top_k if use_lazy_retriever else None,
         "lazy_max_iters": lazy_max_iters if use_lazy_retriever else None,
         "lazy_max_results": lazy_max_results if use_lazy_retriever else None,
-        "zero_shot_class_name": zero_shot_class_name if not use_lazy_retriever else None,
-        "zero_shot_min_probability": zero_shot_min_probability if not use_lazy_retriever else None,
+        "zero_shot_class_name": (
+            zero_shot_class_name if not use_lazy_retriever else None
+        ),
+        "zero_shot_min_probability": (
+            zero_shot_min_probability if not use_lazy_retriever else None
+        ),
         "dedup_model_name": dedup_model_name if not use_lazy_retriever else None,
-        "dedup_similarity_threshold": dedup_similarity_threshold if not use_lazy_retriever else None,
+        "dedup_similarity_threshold": (
+            dedup_similarity_threshold if not use_lazy_retriever else None
+        ),
         "dedup_batch_size": dedup_batch_size if not use_lazy_retriever else None,
         "reranker_model_name": reranker_model_name if use_reranker else None,
         "reranker_backend": reranker_backend if use_reranker else None,
@@ -1828,14 +2297,17 @@ def run_future_timeline_pipeline(
 ) -> dict:
     """Run the future timeline pipeline for active event groups."""
     storage = SimulationStorage(storage_dir)
-    run_id = hashlib.sha256(dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")).hexdigest()
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
     run_started_at = dt.datetime.now(dt.timezone.utc)
     logging.info("Future timeline run %s starting", run_id)
     if relevance_run_id is None:
         relevance_run_id = storage.last_relevance_run_id()
     if relevance_run_id is None:
-        raise ValueError("No relevance run id available for future timeline generation.")
-    logging.info("Future timeline relevance_run_id=%s", relevance_run_id)
+        logging.info("Future timeline using all relevance records")
+    else:
+        logging.info("Future timeline relevance_run_id=%s", relevance_run_id)
 
     if timeline_models is None:
         timeline_models = [
@@ -1849,7 +2321,9 @@ def run_future_timeline_pipeline(
 
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
-    event_groups = [event_group_index[event_group_id] for event_group_id in active_event_group_ids]
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
     logging.info("Future timeline event_groups=%s", len(event_groups))
 
     future_service = FutureTimelineService(

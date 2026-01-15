@@ -64,7 +64,9 @@ class OpenMarket:
             active=bool(data.get("active", False)),
             closed=bool(data.get("closed", False)),
             outcomes=json.loads(data["outcomes"]),
-            outcome_prices=[float(x) for x in json.loads(data.get("outcomePrices", "[]"))],
+            outcome_prices=[
+                float(x) for x in json.loads(data.get("outcomePrices", "[]"))
+            ],
         )
 
     def yes_probability(self) -> float | None:

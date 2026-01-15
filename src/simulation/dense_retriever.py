@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from huggingface_hub import hf_hub_download
 
-#import leann_backend_hnsw.hnsw_backend  # noqa: E402
+# import leann_backend_hnsw.hnsw_backend  # noqa: E402
 from leann.api import BACKEND_REGISTRY, LeannBuilder, PassageManager  # noqa: E402
 from leann.interface import LeannBackendSearcherInterface  # noqa: E402
 from luxical.embedder import Embedder  # noqa: E402
@@ -23,6 +23,7 @@ import dspy  # noqa: E402
 
 from .bm25_retriever import BM25SearchTool  # noqa: E402
 from .news_relevance_dspy import DeepSearchRelevantArticles  # noqa: E402
+from ..mlflow_tracing import configure_dspy_autolog  # noqa: E402
 
 if TYPE_CHECKING:
     from .simulation_pipeline import NewsArticle
@@ -105,7 +106,9 @@ class DenseNewsIndex:
         embeddings = self._embed_texts(texts, purpose="documents")
         embeddings_file = Path(self.temp_dir.name) / "news_embeddings.pkl"
         with open(embeddings_file, "wb") as handle:
-            pickle.dump(([article.article_id for article in self.articles], embeddings), handle)
+            pickle.dump(
+                ([article.article_id for article in self.articles], embeddings), handle
+            )
 
         builder = LeannBuilder(
             backend_name=self.backend_name,
@@ -134,7 +137,9 @@ class DenseNewsIndex:
         meta_path = Path(f"{self.index_path}.meta.json")
         with open(meta_path, encoding="utf-8") as handle:
             meta = json.load(handle)
-        self.passage_manager = PassageManager(meta["passage_sources"], metadata_file_path=str(meta_path))
+        self.passage_manager = PassageManager(
+            meta["passage_sources"], metadata_file_path=str(meta_path)
+        )
         backend_factory = BACKEND_REGISTRY[self.backend_name]
         self.backend_searcher = backend_factory.searcher(str(self.index_path))
 
@@ -147,7 +152,9 @@ class DenseNewsIndex:
 
     def _embed_texts(self, texts: list[str], purpose: str) -> np.ndarray:
         """Return dense embeddings for the provided texts."""
-        logging.info("Dense embeddings starting purpose=%s items=%s", purpose, len(texts))
+        logging.info(
+            "Dense embeddings starting purpose=%s items=%s", purpose, len(texts)
+        )
         started_at = time.perf_counter()
         embeddings = self.embedder(texts, progress_bars=self.show_progress)
         elapsed = time.perf_counter() - started_at
@@ -178,7 +185,7 @@ class DenseNewsIndex:
             query,
             top_k,
             elapsed,
-            len(results["labels"][0])
+            len(results["labels"][0]),
         )
         labels = results["labels"][0]
         return [self.article_by_id[str(label)] for label in labels]
@@ -237,18 +244,23 @@ class DenseSearchTool:
 
     def collected_articles(self) -> list["NewsArticle"]:
         """Return unique candidate articles collected during searches."""
-        return [self.index.article_for_id(article_id) for article_id in self.candidate_ids]
+        return [
+            self.index.article_for_id(article_id) for article_id in self.candidate_ids
+        ]
 
 
 class DenseDeepSearchAgent(dspy.Module):
     """DSPy module that uses dense search to identify relevant articles."""
 
-    def __init__(self, model: str, search_tool: DenseSearchTool, max_iters: int) -> None:
+    def __init__(
+        self, model: str, search_tool: DenseSearchTool, max_iters: int
+    ) -> None:
         """Initialize the deep search agent with a model and dense tool."""
         super().__init__()
         self.model = model
         self.search_tool = search_tool
         self.max_iters = max_iters
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(model))
         self.module = dspy.ReAct(
             DeepSearchRelevantArticles,
@@ -263,6 +275,7 @@ class DenseDeepSearchAgent(dspy.Module):
         max_results: int,
     ) -> dspy.Prediction:
         """Run the agent and return the raw DSPy prediction."""
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(self.model))
         return self.module(
             event_group_prompt=build_deep_search_prompt(event_group_prompt),
@@ -327,6 +340,7 @@ class DualSearchAgent(dspy.Module):
         self.bm25_tool = bm25_tool
         self.dense_tool = dense_tool
         self.max_iters = max_iters
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(model))
         self.module = dspy.ReAct(
             DeepSearchRelevantArticles,
@@ -344,6 +358,7 @@ class DualSearchAgent(dspy.Module):
         max_results: int,
     ) -> dspy.Prediction:
         """Run the agent and return the raw DSPy prediction."""
+        configure_dspy_autolog()
         dspy.configure(lm=dspy.LM(self.model))
         return self.module(
             event_group_prompt=build_deep_search_prompt(event_group_prompt),

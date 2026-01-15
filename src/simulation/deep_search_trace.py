@@ -31,11 +31,17 @@ def trace_timestamp() -> str:
 
 def log_trace_write_started(event_group_id: str, path: Path) -> float:
     """Log the start of a trace write and return the timer start."""
-    logging.info("Deep search trace write starting event_group_id=%s path=%s", event_group_id, path)
+    logging.info(
+        "Deep search trace write starting event_group_id=%s path=%s",
+        event_group_id,
+        path,
+    )
     return time.perf_counter()
 
 
-def log_trace_write_completed(event_group_id: str, path: Path, started_at: float) -> None:
+def log_trace_write_completed(
+    event_group_id: str, path: Path, started_at: float
+) -> None:
     """Log completion for a trace write."""
     elapsed = time.perf_counter() - started_at
     logging.info(
