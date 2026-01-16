@@ -1,11 +1,14 @@
+import datetime as dt
 import json
 import logging
+import time
 from pathlib import Path
 
 import fire
 from dotenv import load_dotenv
 
 from src.processing.run_pipeline import run_pipeline
+from src.portfolio_optimize import run_portfolio_optimizer
 from src.simulation.openforecaster import run_openforecaster_pipeline
 from src.simulation.simulation_pipeline import build_future_timeline_llm_inputs
 
@@ -64,6 +67,36 @@ class CLI:
         )
         for record in records:
             print(json.dumps(record, ensure_ascii=True))
+
+    def optimize_portfolio(
+        self,
+        max_fraction_per_market: float,
+        max_total_fraction: float,
+        kelly_fraction: float = 1.0,
+        turnover_penalty: float = 0.0,
+        epsilon: float = 1e-9,
+        solver: str = "ECOS",
+        round_threshold: float = 1e-6,
+        probabilities_path: Path = Path("data")
+        / "simulation"
+        / "estimated_event_probabilities.jsonl",
+        events_path: Path = Path("data") / "events.jsonl",
+    ) -> None:
+        """Optimize the portfolio using latest probabilities and market prices."""
+        logging.info("Portfolio optimization entrypoint starting")
+        output = run_portfolio_optimizer(
+            probabilities_path=probabilities_path,
+            events_path=events_path,
+            max_fraction_per_market=max_fraction_per_market,
+            max_total_fraction=max_total_fraction,
+            kelly_fraction=kelly_fraction,
+            turnover_penalty=turnover_penalty,
+            epsilon=epsilon,
+            solver=solver,
+            round_threshold=round_threshold,
+        )
+        logging.info("Portfolio optimization entrypoint finished")
+        print(json.dumps(output, ensure_ascii=True, indent=2))
 
 
 if __name__ == "__main__":
