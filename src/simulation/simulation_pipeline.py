@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
 from typing import Callable, Iterable
+import functools
 
 import dspy
 import more_itertools as mit
@@ -66,6 +67,20 @@ class NewsArticle:
 
     def prompt_text(self) -> str:
         """Return the text used for relevance judgment."""
+        return f"{self.title}\n\n{self.desc}".strip()
+
+
+@dataclass(frozen=True)
+class DedupArticle:
+    """Minimal article representation for deduplication."""
+
+    article_id: str
+    title: str
+    desc: str
+    published_at: dt.datetime
+
+    def prompt_text(self) -> str:
+        """Return the text used for deduplication."""
         return f"{self.title}\n\n{self.desc}".strip()
 
 
@@ -1541,15 +1556,11 @@ def deduplicate_relevant_records(
         luxical_model_filename,
     )
     articles = [
-        NewsArticle(
+        DedupArticle(
             article_id=record["article_id"],
-            url=record["article_url"],
             title=record["article_title"],
             desc=record["article_desc"],
             published_at=parse_news_datetime(record["article_published_at"]),
-            domain=record["article_domain"],
-            outlet_name=record["article_outlet_name"],
-            lang=record["article_lang"],
         )
         for record in records
     ]

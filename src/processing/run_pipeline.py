@@ -1,18 +1,12 @@
 from pathlib import Path
 import logging
 
-from .pipeline import (
-    fetch_polymarkets_events,
-    generate_event_table,
-    classify_event_geopol_prob,
-    download_news_past_week,
-)
-from ..news_data import NewsDownloader
 from ..simulation.simulation_pipeline import (
-    run_present_timeline_pipeline,
     run_relevance_pipeline,
     run_future_timeline_pipeline,
 )
+from ..news_data import NewsDownloader
+
 
 def run_pipeline(
     force_future: bool = False,
@@ -29,26 +23,26 @@ def run_pipeline(
     NewsDownloader(news_base_path).download_latest()
 
     events_path = Path("data") / "events.jsonl"
-    #fetch_polymarkets_events(events_path)
-    
-    events_geopol_prob_path = Path("data") / "events_geopol_prob.jsonl"
-    
-    #classify_event_geopol_prob(events_geopol_prob_path, events_path)
-    # make excel as byproduct
-    events_table_path = Path("data") / f'events_stats_table.jsonl'
+    # fetch_polymarkets_events(events_path)
 
-    #generate_event_table(
+    events_geopol_prob_path = Path("data") / "events_geopol_prob.jsonl"
+
+    # classify_event_geopol_prob(events_geopol_prob_path, events_path)
+    # make excel as byproduct
+    events_table_path = Path("data") / "events_stats_table.jsonl"
+
+    # generate_event_table(
     #    events_table_path,
     #    events_geopol_prob_path,
     #    events_path
-    #)
+    # )
 
-    #run_present_timeline_pipeline(
+    # run_present_timeline_pipeline(
     #    active_event_groups_path=Path("data") / "active_event_groups.jsonl",
     #    events_path=events_path,
     #    storage_dir=Path("data") / "simulation",
     #    force_present=False,
-    #)
+    # )
 
     logging.info(
         "Running relevance pipeline with events_path=%s news_base_path=%s storage_dir=%s",
@@ -58,11 +52,11 @@ def run_pipeline(
     )
     logging.info(
         "Relevance module=%s",
-        "lazy(agentic)"
-        if use_lazy_retriever
-        else "eager(reranker)"
-        if use_reranker
-        else "eager(classifier)",
+        (
+            "lazy(agentic)"
+            if use_lazy_retriever
+            else "eager(reranker)" if use_reranker else "eager(classifier)"
+        ),
     )
     relevance_run = run_relevance_pipeline(
         active_event_groups_path=Path("data") / "active_event_groups.jsonl",
@@ -77,7 +71,6 @@ def run_pipeline(
         reranker_model_name="mixedbread-ai/mxbai-rerank-base-v2",
         # optional:
         reranker_backend="mxbai",
-
     )
     logging.info("Relevance pipeline completed run_id=%s", relevance_run["run_id"])
     #run_future_timeline_pipeline(
