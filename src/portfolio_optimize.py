@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from src.portfolio_optimization import PortfolioOptimizationConfig, PortfolioOptimizer
-from src.prediction_markets import EventGroup, Events
+from src.prediction_markets import EventGroup, Events, OpenMarket, PolymarketApi
 
 
 def load_latest_market_probabilities(path: Path) -> dict[str, dict[str, dict]]:
@@ -37,6 +37,27 @@ def load_latest_market_probabilities(path: Path) -> dict[str, dict[str, dict]]:
     return grouped
 
 
+def load_run_market_probabilities(path: Path, run_id: str) -> list[dict]:
+    """Load probability records for a specific run id."""
+    start_time = time.time()
+    logging.info("Loading run probabilities from %s run_id=%s", path, run_id)
+    records: list[dict] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            record = json.loads(line)
+            if record["run_id"] != run_id:
+                continue
+            records.append(record)
+    elapsed = time.time() - start_time
+    logging.info(
+        "Loaded %d probability records in %.2fs for run_id=%s",
+        len(records),
+        elapsed,
+        run_id,
+    )
+    return records
+
+
 def load_event_group_index(events_path: Path) -> dict[str, EventGroup]:
     """Load event groups from events.jsonl and index by event_group_id."""
     start_time = time.time()
@@ -46,6 +67,33 @@ def load_event_group_index(events_path: Path) -> dict[str, EventGroup]:
     elapsed = time.time() - start_time
     logging.info("Loaded %d event groups in %.2fs", len(event_groups), elapsed)
     return event_groups
+
+
+def fetch_latest_market_prices(market_ids: set[str]) -> dict[str, float]:
+    """Fetch latest YES prices for the provided market ids."""
+    start_time = time.time()
+    logging.info("Fetching latest market prices for %d markets", len(market_ids))
+    api = PolymarketApi()
+    prices: dict[str, float] = {}
+    for event in api.iter_event_dicts():
+        for market_data in event["markets"]:
+            market_id = str(market_data["id"])
+            if market_id not in market_ids:
+                continue
+            market = OpenMarket.from_api(market_data)
+            p_yes = market.yes_probability()
+            if p_yes is None:
+                raise ValueError(f"Market {market_id} missing YES probability.")
+            prices[market_id] = p_yes
+        if len(prices) == len(market_ids):
+            break
+    elapsed = time.time() - start_time
+    logging.info(
+        "Fetched %d market prices in %.2fs",
+        len(prices),
+        elapsed,
+    )
+    return prices
 
 
 def build_optimizer_inputs(
@@ -92,6 +140,41 @@ def build_optimizer_inputs(
     return market_rows, np.array(p_yes_values, dtype=float), np.array(q_values, dtype=float)
 
 
+def build_optimizer_inputs_from_prices(
+    probability_records: list[dict],
+    market_prices: dict[str, float],
+) -> tuple[list[dict], np.ndarray, np.ndarray]:
+    """Build optimizer inputs using explicit market prices."""
+    start_time = time.time()
+    logging.info("Building optimizer inputs from explicit market prices")
+    market_rows: list[dict] = []
+    p_yes_values: list[float] = []
+    q_values: list[float] = []
+    for record in probability_records:
+        market_id = record["market_id"]
+        p_yes = market_prices[market_id]
+        q = record["probability"]
+        market_rows.append(
+            {
+                "event_group_id": record["event_group_id"],
+                "market_id": market_id,
+                "market_question": record["market_question"],
+                "market_slug": record["market_slug"],
+                "p_yes": p_yes,
+                "q": q,
+            }
+        )
+        p_yes_values.append(p_yes)
+        q_values.append(q)
+    elapsed = time.time() - start_time
+    logging.info(
+        "Built optimizer inputs for %d markets in %.2fs",
+        len(market_rows),
+        elapsed,
+    )
+    return market_rows, np.array(p_yes_values, dtype=float), np.array(q_values, dtype=float)
+
+
 def calculate_marginal_gains(
     p_yes: float,
     q: float,
@@ -123,6 +206,76 @@ def calculate_marginal_gains(
         directional = max(marginal_yes, marginal_no)
 
     return marginal_yes, marginal_no, directional
+
+
+def run_portfolio_optimizer_from_prices(
+    probability_records: list[dict],
+    market_prices: dict[str, float],
+    max_fraction_per_market: float,
+    max_total_fraction: float,
+    kelly_fraction: float = 1.0,
+    turnover_penalty: float = 0.0,
+    epsilon: float = 1e-9,
+    solver: str = "ECOS",
+    round_threshold: float = 1e-6,
+) -> dict:
+    """Run the portfolio optimizer using explicit market prices."""
+    logging.info("Running portfolio optimizer using explicit market prices")
+    market_rows, p_yes, q = build_optimizer_inputs_from_prices(
+        probability_records,
+        market_prices,
+    )
+
+    if len(p_yes) == 0:
+        raise ValueError("No markets found with probabilities.")
+
+    optimizer = PortfolioOptimizer(
+        PortfolioOptimizationConfig(
+            max_fraction_per_market=max_fraction_per_market,
+            max_total_fraction=max_total_fraction,
+            kelly_fraction=kelly_fraction,
+            turnover_penalty=turnover_penalty,
+            epsilon=epsilon,
+            solver=solver,
+        )
+    )
+
+    current_alloc = np.zeros(len(p_yes), dtype=float)
+    result = optimizer.optimize(
+        p_yes=p_yes,
+        q=q,
+        current_alloc=current_alloc,
+    )
+
+    allocations = []
+    for row, raw_alloc in zip(market_rows, result.target_alloc, strict=True):
+        marginal_yes, marginal_no, directional = calculate_marginal_gains(
+            row["p_yes"],
+            row["q"],
+            raw_alloc,
+        )
+        alloc = raw_alloc
+        if abs(alloc) < round_threshold:
+            alloc = 0.0
+        allocations.append(
+            {
+                "event_group_id": row["event_group_id"],
+                "market_id": row["market_id"],
+                "market_question": row["market_question"],
+                "market_slug": row["market_slug"],
+                "p_yes": row["p_yes"],
+                "q": row["q"],
+                "target_alloc": alloc,
+                "marginal_gain_yes": marginal_yes,
+                "marginal_gain_no": marginal_no,
+                "marginal_gain_directional": directional,
+            }
+        )
+
+    return {
+        "expected_log_growth": result.expected_log_growth,
+        "allocations": allocations,
+    }
 
 
 def run_portfolio_optimizer(

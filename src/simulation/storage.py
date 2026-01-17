@@ -14,6 +14,9 @@ class SimulationStorage:
         """Ensure storage directories and paths are initialized."""
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.present_timelines_path = self.base_dir / "present_timelines.jsonl"
+        self.present_timelines_perplexity_path = (
+            self.base_dir / "present_timelines_perplexity.jsonl"
+        )
         self.future_timelines_path = self.base_dir / "future_timelines.jsonl"
         self.probabilities_path = self.base_dir / "estimated_event_probabilities.jsonl"
         self.relevance_path = self.base_dir / "realtime_relevance.jsonl"
@@ -24,6 +27,10 @@ class SimulationStorage:
     def append_present_timeline(self, record: dict) -> None:
         """Append a present timeline record."""
         self._append_jsonl(self.present_timelines_path, record)
+
+    def append_present_timeline_perplexity(self, record: dict) -> None:
+        """Append a Perplexity present timeline record."""
+        self._append_jsonl(self.present_timelines_perplexity_path, record)
 
     def append_future_timeline(self, record: dict) -> None:
         """Append a future timeline record."""
@@ -52,6 +59,11 @@ class SimulationStorage:
     def load_present_timeline_index(self) -> dict[str, dict]:
         """Return a mapping of event_group_id to the latest present timeline record."""
         records = self._iter_jsonl(self.present_timelines_path)
+        return {record["event_group_id"]: record for record in records}
+
+    def load_present_timeline_perplexity_index(self) -> dict[str, dict]:
+        """Return a mapping of event_group_id to the latest Perplexity timeline record."""
+        records = self._iter_jsonl(self.present_timelines_perplexity_path)
         return {record["event_group_id"]: record for record in records}
 
     def purge_present_timelines(self, event_group_id: str) -> int:

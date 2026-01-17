@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain
 from pathlib import Path
 from typing import Callable, Iterable
@@ -31,6 +31,9 @@ from ..news_enrichment import ZeroShotClassifier
 from ..mlflow_tracing import configure_dspy_autolog, log_inference_call
 from .generate_future_timeline import run_model, sanitize_future_timeline_topic
 from .generate_present_timeline import generate_present_timeline
+from .generate_present_timeline_perplexity import (
+    generate_present_timeline_perplexity,
+)
 from .bm25_retriever import BM25NewsIndex, BM25SearchTool
 from .deep_search_trace import (
     DeepSearchTraceStore,
@@ -68,6 +71,76 @@ class NewsArticle:
     def prompt_text(self) -> str:
         """Return the text used for relevance judgment."""
         return f"{self.title}\n\n{self.desc}".strip()
+
+
+class BoilerplateDeleter:
+    """Apply the boilerplate-deleter model to news headlines."""
+
+    def __init__(self, model_path: Path, batch_size: int = 8) -> None:
+        """Initialize the deleter with the local model path and batch size."""
+        self.model_path = model_path
+        self.batch_size = batch_size
+        self.tokenizer = None
+        self.model = None
+
+    def setup(self) -> None:
+        """Load the tokenizer and model for inference."""
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_path, device_map="auto", torch_dtype=torch.bfloat16
+        ).eval()
+
+    def shutdown(self) -> None:
+        """Release model resources."""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        if self.tokenizer is not None:
+            del self.tokenizer
+            self.tokenizer = None
+
+    def _build_prompt(self, article: NewsArticle) -> str:
+        """Build the prompt expected by the boilerplate deleter."""
+        return (
+            "<instruction>Remove all boilerplate from the news title: source names, other metadata.</instruction>\n"
+            f"<title>{article.title}</title>\n"
+            f"<domainName>{article.outlet_name}</domainName>\n"
+            f"<domainUrl>{article.domain}</domainUrl>"
+        )
+
+    def clean_articles(self, articles: list[NewsArticle]) -> list[NewsArticle]:
+        """Return articles with boilerplate-stripped titles."""
+        if not articles:
+            return []
+        if self.model is None or self.tokenizer is None:
+            self.setup()
+        assert self.model is not None
+        assert self.tokenizer is not None
+        cleaned = []
+        device = getattr(self.model, "device", torch.device("cpu"))
+        for batch_start in range(0, len(articles), self.batch_size):
+            batch = articles[batch_start : batch_start + self.batch_size]
+            prompts = [self._build_prompt(article) for article in batch]
+            inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=64,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                )
+            prompt_length = inputs["input_ids"].shape[1]
+            for idx in range(len(batch)):
+                generated = self.tokenizer.decode(
+                    output_ids[idx][prompt_length:], skip_special_tokens=True
+                ).strip()
+                cleaned.append(replace(batch[idx], title=generated))
+        return cleaned
 
 
 @dataclass(frozen=True)
@@ -687,6 +760,75 @@ class PresentTimelineService:
             self.storage.append_present_timeline(record)
             logging.info(
                 "Stored present timeline for event_group_id=%s",
+                event_group.id(),
+            )
+            generated.append(record)
+        return generated
+
+
+class PerplexityPresentTimelineService:
+    """Generate and store Perplexity present timelines for active event groups."""
+
+    def __init__(
+        self,
+        storage: SimulationStorage,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        current_date: str,
+    ) -> None:
+        """Initialize the service with Perplexity model settings."""
+        self.storage = storage
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.current_date = current_date
+
+    def generate_if_missing(
+        self,
+        event_groups: list[EventGroup],
+        force: bool,
+        run_id: str,
+    ) -> list[dict]:
+        """Generate Perplexity timelines if missing or forced."""
+        existing = self.storage.load_present_timeline_perplexity_index()
+        generated = []
+        for event_group in event_groups:
+            logging.info(
+                "Perplexity timeline check for event_group_id=%s", event_group.id()
+            )
+            if event_group.id() in existing and not force:
+                logging.info(
+                    "Perplexity timeline exists for event_group_id=%s; skipping",
+                    event_group.id(),
+                )
+                continue
+            logging.info(
+                "Generating Perplexity timeline for event_group_id=%s",
+                event_group.id(),
+            )
+            output = generate_present_timeline_perplexity(
+                event_group.template_title,
+                current_date=self.current_date,
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                event_group_id=event_group.id(),
+                run_id=run_id,
+            )
+            record = {
+                "event_group_id": event_group.id(),
+                "event_group_title": event_group.template_title,
+                "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "timeline": output["timeline"],
+                "prompt": output["prompt"],
+                "model": output["model"],
+                "current_date": output["current_date"],
+                "run_id": run_id,
+            }
+            self.storage.append_present_timeline_perplexity(record)
+            logging.info(
+                "Stored Perplexity timeline for event_group_id=%s",
                 event_group.id(),
             )
             generated.append(record)
@@ -1389,6 +1531,120 @@ class FutureTimelineService:
         return summaries
 
 
+class PerplexityFutureTimelineService:
+    """Generate future timelines from Perplexity present timelines only."""
+
+    def __init__(
+        self,
+        storage: SimulationStorage,
+        timeline_models: list[str],
+        timeline_temps: list[float],
+        timeline_rollouts: int,
+    ) -> None:
+        """Initialize the service with timeline models, temperatures, and rollouts."""
+        self.storage = storage
+        self.estimator = FutureTimelineEstimator(
+            timeline_models,
+            timeline_temps,
+            timeline_rollouts,
+        )
+
+    def process(
+        self,
+        event_groups: list[EventGroup],
+        run_id: str,
+    ) -> list[dict]:
+        """Generate future timelines using Perplexity present timelines only."""
+        present_timeline_index = self.storage.load_present_timeline_perplexity_index()
+        summaries = []
+        for event_group in event_groups:
+            event_group_id = event_group.id()
+            if event_group_id not in present_timeline_index:
+                logging.info(
+                    "Perplexity future timeline skipping event_group_id=%s; no present timeline",
+                    event_group_id,
+                )
+                continue
+            present_record = present_timeline_index[event_group_id]
+            present_timeline = present_record["timeline"]
+            present_context = format_present_timeline_context(present_timeline)
+            logging.info(
+                "Perplexity future timeline generating event_group_id=%s present_chars=%s",
+                event_group_id,
+                len(present_timeline),
+            )
+            scenario = build_future_timeline_prompt(
+                event_group, self.estimator.models[0]
+            )
+            contexts = [present_context]
+            market_specs = build_market_implication_specs(event_group)
+            if not market_specs:
+                logging.info(
+                    "Perplexity future timeline skipping event_group_id=%s; no open markets",
+                    event_group_id,
+                )
+                continue
+            generation_started_at = time.perf_counter()
+            timeline_output = self.estimator.generate(
+                scenario=scenario,
+                contexts=contexts,
+                current_date=dt.date.today().isoformat(),
+                market_specs=market_specs,
+                trace_metadata={
+                    "pipeline_run_id": run_id,
+                    "event_group_id": event_group_id,
+                    "present_timeline_source": "perplexity",
+                },
+            )
+            generation_elapsed = time.perf_counter() - generation_started_at
+            logging.info(
+                "Perplexity future timeline generation completed event_group_id=%s seconds=%.2f rollouts=%s",
+                event_group_id,
+                generation_elapsed,
+                len(timeline_output["results"]),
+            )
+            generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            timeline_record = {
+                "event_group_id": event_group_id,
+                "event_group_title": event_group.template_title,
+                "generated_at": generated_at,
+                "scenario": scenario,
+                "contexts_count": len(contexts),
+                "models": self.estimator.models,
+                "temps": self.estimator.temps,
+                "rollouts_per_temp": self.estimator.rollouts_per_temp,
+                "results": timeline_output["results"],
+                "market_probabilities": timeline_output["market_probabilities"],
+                "run_id": run_id,
+                "present_timeline_source": "perplexity",
+                "present_timeline_generated_at": present_record["generated_at"],
+            }
+            self.storage.append_future_timeline(timeline_record)
+            for market_probability in timeline_output["market_probabilities"]:
+                probability_record = {
+                    "event_group_id": event_group_id,
+                    "event_group_title": event_group.template_title,
+                    "generated_at": generated_at,
+                    "market_id": market_probability["market_id"],
+                    "market_question": market_probability["market_question"],
+                    "market_slug": market_probability["market_slug"],
+                    "market_end_date": market_probability["market_end_date"],
+                    "implication_date": market_probability["implication_date"],
+                    "probability": market_probability["probability"],
+                    "samples": market_probability["samples"],
+                    "run_id": run_id,
+                    "present_timeline_source": "perplexity",
+                }
+                self.storage.append_probability_estimate(probability_record)
+            summaries.append(
+                {
+                    "event_group_id": event_group_id,
+                    "contexts_used": len(contexts),
+                }
+            )
+        return summaries
+
+
 def load_active_event_group_ids(path: Path) -> list[str]:
     """Load active event group ids from JSONL."""
     with path.open("r", encoding="utf-8") as handle:
@@ -1703,6 +1959,60 @@ def build_future_timeline_llm_inputs(
     return results
 
 
+def build_future_timeline_llm_inputs_perplexity(
+    active_event_groups_path: Path,
+    events_path: Path,
+    storage_dir: Path,
+) -> list[dict]:
+    """Build future timeline LLM inputs from Perplexity present timelines only."""
+    storage = SimulationStorage(storage_dir)
+    active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
+    event_group_index = load_event_group_index(events_path)
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
+    present_timeline_index = storage.load_present_timeline_perplexity_index()
+    logging.info(
+        "Future timeline Perplexity input preview event_groups=%s", len(event_groups)
+    )
+    results: list[dict] = []
+    for event_group in event_groups:
+        event_group_id = event_group.id()
+        record: dict = {
+            "event_group_id": event_group_id,
+            "event_group_title": event_group.template_title,
+        }
+        if event_group_id not in present_timeline_index:
+            record["will_generate"] = False
+            record["skip_reason"] = "no_present_timeline"
+            results.append(record)
+            continue
+        market_specs = build_market_implication_specs(event_group)
+        if not market_specs:
+            record["will_generate"] = False
+            record["skip_reason"] = "no_open_markets"
+            results.append(record)
+            continue
+        present_record = present_timeline_index[event_group_id]
+        present_timeline = present_record["timeline"]
+        present_context = format_present_timeline_context(present_timeline)
+        record.update(
+            {
+                "will_generate": True,
+                "timeline_scenario": build_future_timeline_prompt(
+                    event_group, "preview"
+                ),
+                "contexts": [present_context],
+                "current_date": dt.date.today().isoformat(),
+                "present_timeline_generated_at": present_record["generated_at"],
+                "recent_news_selected": 0,
+                "recent_news_candidate_count": 0,
+            }
+        )
+        results.append(record)
+    return results
+
+
 def serialize_prediction(prediction: dspy.Prediction) -> dict:
     """Return a JSON-safe snapshot of a DSPy prediction."""
     if prediction is None:
@@ -1846,6 +2156,7 @@ def apply_zero_shot_filter(
     run_id: str,
     class_name: str,
     min_probability: float,
+    original_title_by_id: dict[str, str] | None = None,
 ) -> list[NewsArticle]:
     """Score articles with zero-shot classifier, persist results, and filter by score."""
     if not articles:
@@ -1910,6 +2221,12 @@ def apply_zero_shot_filter(
             "article_id": article.article_id,
             "article_url": article.url,
             "article_title": article.title,
+            "article_title_clean": article.title,
+            "article_title_orig": (
+                article.title
+                if original_title_by_id is None
+                else original_title_by_id[article.article_id]
+            ),
             "article_desc": article.desc,
             "article_published_at": article.published_at.isoformat(),
             "article_domain": article.domain,
@@ -1987,6 +2304,62 @@ def run_present_timeline_pipeline(
     }
     storage.append_run_metadata(run_record)
     logging.info("Present timeline run %s completed", run_id)
+    return run_record
+
+
+def run_present_timeline_perplexity_pipeline(
+    active_event_groups_path: Path,
+    events_path: Path,
+    storage_dir: Path,
+    model: str = "perplexity/sonar-deep-research",
+    temperature: float = 0.2,
+    max_tokens: int = 12000,
+    current_date: str | None = None,
+    force_present: bool = False,
+) -> dict:
+    """Run the Perplexity present timeline generation pipeline."""
+    storage = SimulationStorage(storage_dir)
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
+    run_started_at = dt.datetime.now(dt.timezone.utc)
+    logging.info("Perplexity present timeline run %s starting", run_id)
+
+    active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
+    event_group_index = load_event_group_index(events_path)
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
+    logging.info("Perplexity present timeline event_groups=%s", len(event_groups))
+    if current_date is None:
+        current_date = dt.date.today().isoformat()
+
+    present_service = PerplexityPresentTimelineService(
+        storage=storage,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        current_date=current_date,
+    )
+    generated_present = present_service.generate_if_missing(
+        event_groups,
+        force_present,
+        run_id,
+    )
+
+    run_finished_at = dt.datetime.now(dt.timezone.utc)
+    run_record = {
+        "run_id": run_id,
+        "started_at": run_started_at.isoformat(),
+        "ended_at": run_finished_at.isoformat(),
+        "present_timelines_generated": len(generated_present),
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "current_date": current_date,
+    }
+    storage.append_run_metadata(run_record)
+    logging.info("Perplexity present timeline run %s completed", run_id)
     return run_record
 
 
@@ -2107,6 +2480,7 @@ def run_relevance_pipeline(
     news_paths = iter_news_paths(news_base_path, news_since)
     articles = list(iter_news_articles(news_paths, news_since))
     articles_total = len(articles)
+    boilerplate_model_path: Path | None = None
     if use_lazy_retriever:
         logging.info(
             "Relevance lazy retrieval articles=%s news_paths=%s",
@@ -2160,6 +2534,66 @@ def run_relevance_pipeline(
         dedup_ratio = None
         relevance_mode = "lazy"
     else:
+        boilerplate_model_path = (
+            Path.home()
+            / "code"
+            / "boilerplate-fewshot"
+            / "trained-model"
+            / "checkpoint-247"
+        )
+        logging.info(
+            "Relevance boilerplate deletion starting articles=%s model_path=%s batch_size=%s",
+            len(articles),
+            boilerplate_model_path,
+            48,
+        )
+        boilerplate_started_at = time.perf_counter()
+        deleter = BoilerplateDeleter(boilerplate_model_path, batch_size=48)
+        original_articles = articles
+        original_title_by_id = {article.article_id: article.title for article in articles}
+        try:
+            articles = deleter.clean_articles(articles)
+        finally:
+            deleter.shutdown()
+        boilerplate_elapsed = time.perf_counter() - boilerplate_started_at
+        log_inference_call(
+            name="boilerplate.delete",
+            model=str(boilerplate_model_path),
+            inputs={
+                "articles": [
+                    {
+                        "article_id": article.article_id,
+                        "title": article.title,
+                        "desc": article.desc,
+                        "domain": article.domain,
+                        "outlet_name": article.outlet_name,
+                    }
+                    for article in original_articles
+                ]
+            },
+            outputs={
+                "cleaned": [
+                    {
+                        "article_id": article.article_id,
+                        "title": article.title,
+                    }
+                    for article in articles
+                ]
+            },
+            metadata={
+                "pipeline_run_id": run_id,
+                "event_group_id": None,
+                "stage": "boilerplate_delete",
+                "news_ids": [article.article_id for article in articles],
+                "batch_size": deleter.batch_size,
+            },
+            duration_seconds=boilerplate_elapsed,
+        )
+        logging.info(
+            "Relevance boilerplate deletion completed seconds=%.2f articles=%s",
+            boilerplate_elapsed,
+            len(articles),
+        )
         zero_shot_started_at = time.perf_counter()
         if use_reranker:
             logging.info(
@@ -2173,6 +2607,7 @@ def run_relevance_pipeline(
                 run_id=run_id,
                 class_name=zero_shot_class_name,
                 min_probability=zero_shot_min_probability,
+                original_title_by_id=original_title_by_id,
             )
             zero_shot_elapsed = time.perf_counter() - zero_shot_started_at
             logging.info(
@@ -2213,6 +2648,7 @@ def run_relevance_pipeline(
                 run_id=run_id,
                 class_name=zero_shot_class_name,
                 min_probability=zero_shot_min_probability,
+                original_title_by_id=original_title_by_id,
             )
             zero_shot_elapsed = time.perf_counter() - zero_shot_started_at
             logging.info(
@@ -2290,6 +2726,9 @@ def run_relevance_pipeline(
         "reranker_max_length": reranker_max_length if use_reranker else None,
         "reranker_batch_size": reranker_batch_size if use_reranker else None,
         "reranker_min_score": reranker_min_score if use_reranker else None,
+        "boilerplate_model_path": (
+            str(boilerplate_model_path) if boilerplate_model_path is not None else None
+        ),
     }
     storage.append_run_metadata(run_record)
     logging.info("Relevance run %s completed", run_id)
@@ -2301,9 +2740,12 @@ def run_future_timeline_pipeline(
     events_path: Path,
     storage_dir: Path,
     relevance_run_id: str | None = None,
-    timeline_models: list[str] | None = ["openrouter/x-ai/grok-4.1-fast"],
+    timeline_models: list[str] | None = [
+        "openrouter/x-ai/grok-4.1-fast",
+        "openrouter/google/gemini-3-flash-preview",
+    ],
     timeline_temps: list[float] | None = [0.7],
-    timeline_rollouts: int | None = 10,
+    timeline_rollouts: int | None = 5,
     force_without_relevance: bool = False,
 ) -> dict:
     """Run the future timeline pipeline for active event groups."""
@@ -2322,13 +2764,13 @@ def run_future_timeline_pipeline(
 
     if timeline_models is None:
         timeline_models = [
-            "openrouter/anthropic/claude-opus-4.5",
-            "openrouter/openrouter/bert-nebulon-alpha",
+            "openrouter/x-ai/grok-4.1-fast",
+            "openrouter/google/gemini-3-flash-preview",
         ]
     if timeline_temps is None:
-        timeline_temps = [0.1, 0.3, 0.5, 0.7, 0.9]
+        timeline_temps = [0.7]
     if timeline_rollouts is None:
-        timeline_rollouts = 10
+        timeline_rollouts = 5
 
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
@@ -2363,6 +2805,75 @@ def run_future_timeline_pipeline(
     }
     storage.append_run_metadata(run_record)
     logging.info("Future timeline run %s completed", run_id)
+    return run_record
+
+
+def run_future_timeline_perplexity_pipeline(
+    active_event_groups_path: Path,
+    events_path: Path,
+    storage_dir: Path,
+    timeline_models: list[str] | None = [
+        "openrouter/x-ai/grok-4.1-fast",
+        "openrouter/google/gemini-3-flash-preview",
+    ],
+    timeline_temps: list[float] | None = [0.7],
+    timeline_rollouts: int | None = 5,
+) -> dict:
+    """Run the future timeline pipeline using Perplexity present timelines."""
+    storage = SimulationStorage(storage_dir)
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
+    run_started_at = dt.datetime.now(dt.timezone.utc)
+    logging.info("Perplexity future timeline run %s starting", run_id)
+
+    if timeline_models is None:
+        timeline_models = [
+            "openrouter/x-ai/grok-4.1-fast",
+            "openrouter/google/gemini-3-flash-preview",
+        ]
+    if timeline_temps is None:
+        timeline_temps = [0.1, 0.3, 0.5, 0.7, 0.9]
+    if timeline_rollouts is None:
+        timeline_rollouts = 10
+
+    active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
+    event_group_index = load_event_group_index(events_path)
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
+    logging.info("Perplexity future timeline event_groups=%s", len(event_groups))
+    logging.info(
+        "Perplexity future timeline params models=%s temps=%s rollouts=%s",
+        timeline_models,
+        timeline_temps,
+        timeline_rollouts,
+    )
+
+    future_service = PerplexityFutureTimelineService(
+        storage=storage,
+        timeline_models=timeline_models,
+        timeline_temps=timeline_temps,
+        timeline_rollouts=timeline_rollouts,
+    )
+    summaries = future_service.process(
+        event_groups,
+        run_id,
+    )
+
+    run_finished_at = dt.datetime.now(dt.timezone.utc)
+    run_record = {
+        "run_id": run_id,
+        "started_at": run_started_at.isoformat(),
+        "ended_at": run_finished_at.isoformat(),
+        "event_group_summaries": summaries,
+        "timeline_models": timeline_models,
+        "timeline_temps": timeline_temps,
+        "timeline_rollouts": timeline_rollouts,
+        "present_timeline_source": "perplexity",
+    }
+    storage.append_run_metadata(run_record)
+    logging.info("Perplexity future timeline run %s completed", run_id)
     return run_record
 
 
