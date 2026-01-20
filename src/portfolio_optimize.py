@@ -8,7 +8,13 @@ from pathlib import Path
 import numpy as np
 
 from src.portfolio_optimization import PortfolioOptimizationConfig, PortfolioOptimizer
-from src.prediction_markets import EventGroup, Events, OpenMarket, PolymarketApi
+from src.prediction_markets import (
+    EventGroup,
+    Events,
+    NoCacheLimiterSession,
+    OpenMarket,
+    PolymarketApi,
+)
 
 
 def load_latest_market_probabilities(path: Path) -> dict[str, dict[str, dict]]:
@@ -73,7 +79,7 @@ def fetch_latest_market_prices(market_ids: set[str]) -> dict[str, float]:
     """Fetch latest YES prices for the provided market ids."""
     start_time = time.time()
     logging.info("Fetching latest market prices for %d markets", len(market_ids))
-    api = PolymarketApi()
+    api = PolymarketApi(session=NoCacheLimiterSession(per_second=5))
     prices: dict[str, float] = {}
     for event in api.iter_event_dicts():
         for market_data in event["markets"]:

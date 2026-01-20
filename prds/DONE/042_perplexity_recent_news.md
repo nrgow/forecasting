@@ -1,0 +1,10 @@
+So I'd like a new news relevance module
+So currently we have essentially a three stage pipeline. The first is the generation of present timelines. Then there's the generation of uh relevant news as additional context coming from G Delt. And then there's the future timeline generation.
+We just implemented a new version of the present timeline generation that uses perplexity.
+So what this new news irrelevance module should do is the following. Firstly, for all active event groups it should check when was the most recent present timeline generated.
+Then it should simply make a new LLM call to open router to a perplexity model and ask to summarise the news since the generation of that present timeline until the present. And that summary of the news should be in a timeline format.
+Right, so there are two options. The first case no relevant news summary exists. Then it should, as described, take as its starting point the generation time of the present timeline.
+The second case is if a relevant news summary timeline does exist, then it should take as its starting point the generation time or the end point of the most recent relevant news summary timeline.
+So the idea is that we are accumulating um a sequence of timelines. The first element of the timeline is the present timeline that gets generated once. And then as time progresses, there will be a sequence of these news relevance timelines. Um the idea is that these are faster and cheaper to generate than the present timeline. So we're gonna use a different model to generate these news relevance um kind of sub-timelines.
+The model we should use is this: openrouter: perplexity/sonar
+So importantly, um the prompts for this news timeline summary should basically ask to summarise the news since the it's you know applicable starting point in a timeline format. And if there's no relevance news, um it can simply state that there was there were no major updates.

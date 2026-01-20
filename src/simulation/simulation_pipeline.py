@@ -34,6 +34,12 @@ from .generate_present_timeline import generate_present_timeline
 from .generate_present_timeline_perplexity import (
     generate_present_timeline_perplexity,
 )
+from .generate_present_timeline_simple_wiki import (
+    generate_present_timeline_simple_wiki,
+)
+from .generate_recent_news_timeline_perplexity import (
+    generate_recent_news_timeline_perplexity,
+)
 from .bm25_retriever import BM25NewsIndex, BM25SearchTool
 from .deep_search_trace import (
     DeepSearchTraceStore,
@@ -835,6 +841,190 @@ class PerplexityPresentTimelineService:
         return generated
 
 
+class SimpleWikiPresentTimelineService:
+    """Generate and store simple wiki present timelines for active event groups."""
+
+    def __init__(
+        self,
+        storage: SimulationStorage,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        max_iters: int,
+        current_date: str,
+    ) -> None:
+        """Initialize the service with simple wiki model settings."""
+        self.storage = storage
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.max_iters = max_iters
+        self.current_date = current_date
+
+    def generate_if_missing(
+        self,
+        event_groups: list[EventGroup],
+        force: bool,
+        run_id: str,
+    ) -> list[dict]:
+        """Generate simple wiki timelines if missing or forced."""
+        existing = self.storage.load_present_timeline_simple_wiki_index()
+        generated = []
+        for event_group in event_groups:
+            logging.info(
+                "Simple wiki timeline check for event_group_id=%s", event_group.id()
+            )
+            if event_group.id() in existing and not force:
+                logging.info(
+                    "Simple wiki timeline exists for event_group_id=%s; skipping",
+                    event_group.id(),
+                )
+                continue
+            logging.info(
+                "Generating simple wiki timeline for event_group_id=%s",
+                event_group.id(),
+            )
+            output = generate_present_timeline_simple_wiki(
+                event_group.template_title,
+                current_date=self.current_date,
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                max_iters=self.max_iters,
+                event_group_id=event_group.id(),
+                run_id=run_id,
+            )
+            record = {
+                "event_group_id": event_group.id(),
+                "event_group_title": event_group.template_title,
+                "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "timeline": output["timeline"],
+                "prompt": output["prompt"],
+                "model": output["model"],
+                "current_date": output["current_date"],
+                "usage": output["usage"],
+                "elapsed_seconds": output["elapsed_seconds"],
+                "run_id": run_id,
+            }
+            self.storage.append_present_timeline_simple_wiki(record)
+            logging.info(
+                "Stored simple wiki timeline for event_group_id=%s",
+                event_group.id(),
+            )
+            generated.append(record)
+        return generated
+
+
+class PerplexityRecentNewsTimelineService:
+    """Generate and store Perplexity recent news timelines for active event groups."""
+
+    def __init__(
+        self,
+        storage: SimulationStorage,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> None:
+        """Initialize the service with Perplexity model settings."""
+        self.storage = storage
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def generate(
+        self,
+        event_groups: list[EventGroup],
+        run_id: str,
+    ) -> list[dict]:
+        """Generate Perplexity recent news timelines for active event groups."""
+        present_perplexity = self.storage.load_present_timeline_perplexity_index()
+        present_default = self.storage.load_present_timeline_index()
+        recent_index: dict[str, dict] = {}
+        if self.storage.recent_news_timelines_path.exists():
+            recent_index = self.storage.load_recent_news_timeline_index()
+        generated = []
+        for event_group in event_groups:
+            event_group_id = event_group.id()
+            logging.info(
+                "Recent news timeline check for event_group_id=%s", event_group_id
+            )
+            if event_group_id in present_perplexity:
+                present_record = present_perplexity[event_group_id]
+                present_source = "perplexity"
+            elif event_group_id in present_default:
+                present_record = present_default[event_group_id]
+                present_source = "default"
+            else:
+                logging.info(
+                    "Recent news timeline skipping event_group_id=%s; no present timeline",
+                    event_group_id,
+                )
+                continue
+
+            present_generated_at = parse_present_timeline_generated_at(present_record)
+            window_start_at = present_generated_at
+            previous_summary_at = None
+            if event_group_id in recent_index:
+                previous_record = recent_index[event_group_id]
+                previous_summary_at = parse_recent_news_timeline_generated_at(
+                    previous_record
+                )
+                if previous_summary_at > window_start_at:
+                    window_start_at = previous_summary_at
+            window_end_at = dt.datetime.now(dt.timezone.utc)
+            event_group_prompt = build_event_group_prompt(event_group)
+            logging.info(
+                "Generating recent news timeline event_group_id=%s window_start=%s window_end=%s",
+                event_group_id,
+                window_start_at.isoformat(),
+                window_end_at.isoformat(),
+            )
+            started_at = time.perf_counter()
+            output = generate_recent_news_timeline_perplexity(
+                event_group_prompt=event_group_prompt,
+                window_start=window_start_at.isoformat(),
+                window_end=window_end_at.isoformat(),
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                event_group_id=event_group_id,
+                run_id=run_id,
+            )
+            elapsed = time.perf_counter() - started_at
+            logging.info(
+                "Recent news timeline generation completed event_group_id=%s seconds=%.2f chars=%s",
+                event_group_id,
+                elapsed,
+                len(output["timeline"]),
+            )
+            record = {
+                "event_group_id": event_group_id,
+                "event_group_title": event_group.template_title,
+                "generated_at": window_end_at.isoformat(),
+                "present_timeline_generated_at": present_generated_at.isoformat(),
+                "present_timeline_source": present_source,
+                "window_start": output["window_start"],
+                "window_end": output["window_end"],
+                "timeline": output["timeline"],
+                "prompt": output["prompt"],
+                "model": output["model"],
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "run_id": run_id,
+            }
+            if previous_summary_at is not None:
+                record["previous_summary_generated_at"] = (
+                    previous_summary_at.isoformat()
+                )
+            self.storage.append_recent_news_timeline(record)
+            logging.info(
+                "Stored recent news timeline for event_group_id=%s",
+                event_group_id,
+            )
+            generated.append(record)
+        return generated
+
+
 class RelevanceJudgmentService:
     """Evaluate new articles for relevance against event groups."""
 
@@ -1568,6 +1758,21 @@ class PerplexityFutureTimelineService:
             present_record = present_timeline_index[event_group_id]
             present_timeline = present_record["timeline"]
             present_context = format_present_timeline_context(present_timeline)
+            contexts = [present_context]
+            recent_records: list[dict] = []
+            if self.storage.recent_news_timelines_path.exists():
+                recent_records = self.storage.load_recent_news_timelines_for_group(
+                    event_group_id
+                )
+                present_generated_at = parse_present_timeline_generated_at(present_record)
+                recent_records = filter_recent_news_since(
+                    recent_records,
+                    present_generated_at,
+                )
+                for recent_record in recent_records:
+                    recent_context = format_recent_news_timeline_context(recent_record)
+                    if recent_context:
+                        contexts.append(recent_context)
             logging.info(
                 "Perplexity future timeline generating event_group_id=%s present_chars=%s",
                 event_group_id,
@@ -1576,7 +1781,11 @@ class PerplexityFutureTimelineService:
             scenario = build_future_timeline_prompt(
                 event_group, self.estimator.models[0]
             )
-            contexts = [present_context]
+            logging.info(
+                "Perplexity future timeline contexts ready event_group_id=%s recent_news=%s",
+                event_group_id,
+                len(recent_records),
+            )
             market_specs = build_market_implication_specs(event_group)
             if not market_specs:
                 logging.info(
@@ -1619,6 +1828,19 @@ class PerplexityFutureTimelineService:
                 "present_timeline_source": "perplexity",
                 "present_timeline_generated_at": present_record["generated_at"],
             }
+            if recent_records:
+                timeline_record.update(
+                    {
+                        "recent_news_timelines": [
+                            {
+                                "generated_at": item["generated_at"],
+                                "window_start": item["window_start"],
+                                "window_end": item["window_end"],
+                            }
+                            for item in recent_records
+                        ],
+                    }
+                )
             self.storage.append_future_timeline(timeline_record)
             for market_probability in timeline_output["market_probabilities"]:
                 probability_record = {
@@ -1690,6 +1912,11 @@ def is_mixbread_reranker_record(record: dict) -> bool:
 
 def parse_present_timeline_generated_at(record: dict) -> dt.datetime:
     """Return the present timeline generation timestamp."""
+    return dt.datetime.fromisoformat(record["generated_at"])
+
+
+def parse_recent_news_timeline_generated_at(record: dict) -> dt.datetime:
+    """Return the recent news timeline generation timestamp."""
     return dt.datetime.fromisoformat(record["generated_at"])
 
 
@@ -1867,6 +2094,35 @@ def format_recent_news_context(records: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_recent_news_timeline_context(record: dict) -> str:
+    """Return recent news timeline context for future timeline generation."""
+    timeline = record["timeline"].strip()
+    if not timeline:
+        return ""
+    window_start = record["window_start"]
+    window_end = record["window_end"]
+    return (
+        "Recent news timeline:\n"
+        f"Window: {window_start} to {window_end}\n"
+        f"{timeline}"
+    )
+
+
+def filter_recent_news_since(
+    records: list[dict], window_start: dt.datetime
+) -> list[dict]:
+    """Return recent news timeline records generated since the window start."""
+    recent_records = [
+        record
+        for record in records
+        if parse_recent_news_timeline_generated_at(record) >= window_start
+    ]
+    return sorted(
+        recent_records,
+        key=parse_recent_news_timeline_generated_at,
+    )
+
+
 def build_future_timeline_llm_inputs(
     active_event_groups_path: Path,
     events_path: Path,
@@ -1964,7 +2220,7 @@ def build_future_timeline_llm_inputs_perplexity(
     events_path: Path,
     storage_dir: Path,
 ) -> list[dict]:
-    """Build future timeline LLM inputs from Perplexity present timelines only."""
+    """Build future timeline LLM inputs from Perplexity present timelines."""
     storage = SimulationStorage(storage_dir)
     active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
     event_group_index = load_event_group_index(events_path)
@@ -1996,19 +2252,41 @@ def build_future_timeline_llm_inputs_perplexity(
         present_record = present_timeline_index[event_group_id]
         present_timeline = present_record["timeline"]
         present_context = format_present_timeline_context(present_timeline)
+        contexts = [present_context]
+        recent_records: list[dict] = []
+        if storage.recent_news_timelines_path.exists():
+            recent_records = storage.load_recent_news_timelines_for_group(event_group_id)
+            present_generated_at = parse_present_timeline_generated_at(present_record)
+            recent_records = filter_recent_news_since(
+                recent_records,
+                present_generated_at,
+            )
+            for recent_record in recent_records:
+                recent_context = format_recent_news_timeline_context(recent_record)
+                if recent_context:
+                    contexts.append(recent_context)
         record.update(
             {
                 "will_generate": True,
                 "timeline_scenario": build_future_timeline_prompt(
                     event_group, "preview"
                 ),
-                "contexts": [present_context],
+                "contexts": contexts,
                 "current_date": dt.date.today().isoformat(),
                 "present_timeline_generated_at": present_record["generated_at"],
-                "recent_news_selected": 0,
-                "recent_news_candidate_count": 0,
+                "recent_news_selected": len(recent_records),
+                "recent_news_candidate_count": len(recent_records),
             }
         )
+        if recent_records:
+            record["recent_news_timelines"] = [
+                {
+                    "generated_at": item["generated_at"],
+                    "window_start": item["window_start"],
+                    "window_end": item["window_end"],
+                }
+                for item in recent_records
+            ]
         results.append(record)
     return results
 
@@ -2360,6 +2638,121 @@ def run_present_timeline_perplexity_pipeline(
     }
     storage.append_run_metadata(run_record)
     logging.info("Perplexity present timeline run %s completed", run_id)
+    return run_record
+
+
+def run_present_timeline_simple_wiki_pipeline(
+    active_event_groups_path: Path,
+    events_path: Path,
+    storage_dir: Path,
+    model: str = "x-ai/grok-4-fast",
+    temperature: float = 0.2,
+    max_tokens: int = 32000,
+    max_iters: int = 20,
+    current_date: str | None = None,
+    force_present: bool = False,
+) -> dict:
+    """Run the simple wiki present timeline generation pipeline."""
+    storage = SimulationStorage(storage_dir)
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
+    run_started_at = dt.datetime.now(dt.timezone.utc)
+    logging.info("Simple wiki present timeline run %s starting", run_id)
+
+    active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
+    event_group_index = load_event_group_index(events_path)
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
+    logging.info("Simple wiki present timeline event_groups=%s", len(event_groups))
+    if current_date is None:
+        current_date = dt.date.today().isoformat()
+
+    present_service = SimpleWikiPresentTimelineService(
+        storage=storage,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        max_iters=max_iters,
+        current_date=current_date,
+    )
+    generated_present = present_service.generate_if_missing(
+        event_groups,
+        force_present,
+        run_id,
+    )
+
+    run_finished_at = dt.datetime.now(dt.timezone.utc)
+    run_record = {
+        "run_id": run_id,
+        "started_at": run_started_at.isoformat(),
+        "ended_at": run_finished_at.isoformat(),
+        "present_timelines_generated": len(generated_present),
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "max_iters": max_iters,
+        "current_date": current_date,
+    }
+    storage.append_run_metadata(run_record)
+    logging.info("Simple wiki present timeline run %s completed", run_id)
+    return run_record
+
+
+def run_recent_news_timeline_pipeline(
+    active_event_groups_path: Path,
+    events_path: Path,
+    storage_dir: Path,
+    model: str = "perplexity/sonar",
+    temperature: float = 0.2,
+    max_tokens: int = 2500,
+) -> dict:
+    """Run the Perplexity recent news timeline generation pipeline."""
+    storage = SimulationStorage(storage_dir)
+    run_id = hashlib.sha256(
+        dt.datetime.now(dt.timezone.utc).isoformat().encode("utf-8")
+    ).hexdigest()
+    run_started_at = dt.datetime.now(dt.timezone.utc)
+    overall_started_at = time.perf_counter()
+    logging.info("Recent news timeline run %s starting", run_id)
+
+    active_event_group_ids = load_active_event_group_ids(active_event_groups_path)
+    event_group_index = load_event_group_index(events_path)
+    event_groups = [
+        event_group_index[event_group_id] for event_group_id in active_event_group_ids
+    ]
+    logging.info("Recent news timeline event_groups=%s", len(event_groups))
+
+    recent_service = PerplexityRecentNewsTimelineService(
+        storage=storage,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    generated_recent = recent_service.generate(
+        event_groups,
+        run_id,
+    )
+
+    run_finished_at = dt.datetime.now(dt.timezone.utc)
+    elapsed = time.perf_counter() - overall_started_at
+    run_record = {
+        "run_id": run_id,
+        "started_at": run_started_at.isoformat(),
+        "ended_at": run_finished_at.isoformat(),
+        "recent_news_timelines_generated": len(generated_recent),
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    storage.append_run_metadata(run_record)
+    logging.info(
+        "Recent news timeline run %s completed seconds=%.2f generated=%s",
+        run_id,
+        elapsed,
+        len(generated_recent),
+    )
     return run_record
 
 

@@ -18,6 +18,10 @@ class CachedLimiterSession(CacheMixin, LimiterMixin, Session):
     """
 
 
+class NoCacheLimiterSession(LimiterMixin, Session):
+    """Session class with rate-limiting behavior."""
+
+
 @dataclass(frozen=True)
 class OpenMarket:
     id: str

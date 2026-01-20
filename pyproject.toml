@@ -47,6 +47,7 @@ dependencies = [
     "awscli>=1.43.5",
     "boto3>=1.41.5",
     "cvxpy>=1.7.5",
+    "py-clob-client>=0.34.5",
 ]
 
 [project.scripts]

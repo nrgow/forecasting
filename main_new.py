@@ -24,6 +24,9 @@ from src.simulation.simulation_pipeline import (
     iter_news_paths,
     run_future_timeline_perplexity_pipeline,
     run_present_timeline_perplexity_pipeline,
+    run_present_timeline_simple_wiki_pipeline,
+    run_recent_news_timeline_pipeline,
+    run_realtime_simulation_pipeline,
 )
 
 
@@ -37,6 +40,54 @@ class CLI:
         """Run the main data pipeline."""
         run_pipeline(
             force_future=force_future,
+            use_lazy_retriever=use_lazy_retriever,
+            use_reranker=use_reranker,
+        )
+
+    def run_full_pipeline(
+        self,
+        active_event_groups_path: Path = Path("data") / "active_event_groups.jsonl",
+        events_path: Path = Path("data") / "events.jsonl",
+        news_base_path: Path = Path("/mnt/ssd") / "newstalk-data" / "gdelt-gal",
+        storage_dir: Path = Path("data") / "simulation",
+        force_present: bool = False,
+        present_model: str = "perplexity/sonar-deep-research",
+        present_temperature: float = 0.2,
+        present_max_tokens: int = 12000,
+        present_current_date: str | None = None,
+        target_timeline_chars: int | None = None,
+        min_events: int | None = None,
+        max_events: int | None = None,
+        recent_news_model: str = "perplexity/sonar",
+        recent_news_temperature: float = 0.2,
+        recent_news_max_tokens: int = 2500,
+        use_lazy_retriever: bool = False,
+        use_reranker: bool = True,
+    ) -> None:
+        """Run Perplexity present timelines, recent news, relevance, and future."""
+        run_present_timeline_perplexity_pipeline(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
+            model=present_model,
+            temperature=present_temperature,
+            max_tokens=present_max_tokens,
+            current_date=present_current_date,
+            force_present=force_present,
+        )
+        run_recent_news_timeline_pipeline(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
+            model=recent_news_model,
+            temperature=recent_news_temperature,
+            max_tokens=recent_news_max_tokens,
+        )
+        run_realtime_simulation_pipeline(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            news_base_path=Path(news_base_path),
+            storage_dir=Path(storage_dir),
             use_lazy_retriever=use_lazy_retriever,
             use_reranker=use_reranker,
         )
@@ -64,20 +115,12 @@ class CLI:
         active_event_groups_path: Path = Path("data") / "active_event_groups.jsonl",
         events_path: Path = Path("data") / "events.jsonl",
         storage_dir: Path = Path("data") / "simulation",
-        relevance_run_id: str | None = None,
-        force_without_relevance: bool = False,
-        max_recent_items: int = 200,
-        recent_bucket_count: int = 10,
     ) -> None:
-        """Print JSONL inputs for future timeline LLM generation."""
-        records = build_future_timeline_llm_inputs(
-            active_event_groups_path=active_event_groups_path,
-            events_path=events_path,
-            storage_dir=storage_dir,
-            relevance_run_id=relevance_run_id,
-            force_without_relevance=force_without_relevance,
-            max_recent_items=max_recent_items,
-            recent_bucket_count=recent_bucket_count,
+        """Print JSONL inputs for Perplexity present timeline future generation."""
+        records = build_future_timeline_llm_inputs_perplexity(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
         )
         for record in records:
             print(json.dumps(record, ensure_ascii=True))
@@ -110,14 +153,106 @@ class CLI:
     ) -> None:
         """Generate Perplexity present timelines for active event groups."""
         run_present_timeline_perplexity_pipeline(
-            active_event_groups_path=active_event_groups_path,
-            events_path=events_path,
-            storage_dir=storage_dir,
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             current_date=current_date,
             force_present=force_present,
+        )
+
+    def run_present_timeline_simple_wiki(
+        self,
+        active_event_groups_path: Path = Path("data") / "active_event_groups.jsonl",
+        events_path: Path = Path("data") / "events.jsonl",
+        storage_dir: Path = Path("data") / "simulation",
+        model: str = "x-ai/grok-4-fast",
+        temperature: float = 0.2,
+        max_tokens: int = 32000,
+        max_iters: int = 20,
+        current_date: str | None = None,
+        force_present: bool = False,
+    ) -> None:
+        """Generate simple wiki present timelines for active event groups."""
+        run_present_timeline_simple_wiki_pipeline(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_iters=max_iters,
+            current_date=current_date,
+            force_present=force_present,
+        )
+
+    def run_recent_news_timeline_perplexity(
+        self,
+        active_event_groups_path: Path = Path("data") / "active_event_groups.jsonl",
+        events_path: Path = Path("data") / "events.jsonl",
+        storage_dir: Path = Path("data") / "simulation",
+        model: str = "perplexity/sonar",
+        temperature: float = 0.2,
+        max_tokens: int = 2500,
+    ) -> None:
+        """Generate Perplexity recent news timelines for active event groups."""
+        run_recent_news_timeline_pipeline(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def purge_recent_news_timelines(
+        self,
+        storage_dir: Path = Path("data") / "simulation",
+        event_group_id: str | None = None,
+    ) -> None:
+        """Purge recent news timeline records from storage."""
+        storage = SimulationStorage(Path(storage_dir))
+        removed = storage.purge_recent_news_timelines(event_group_id)
+        logging.info(
+            "Recent news timeline purge completed removed=%s event_group_id=%s",
+            removed,
+            event_group_id,
+        )
+
+    def run_perplexity_news_only(
+        self,
+        active_event_groups_path: Path = Path("data") / "active_event_groups.jsonl",
+        events_path: Path = Path("data") / "events.jsonl",
+        storage_dir: Path = Path("data") / "simulation",
+        present_model: str = "perplexity/sonar-deep-research",
+        present_temperature: float = 0.2,
+        present_max_tokens: int = 12000,
+        present_current_date: str | None = None,
+        force_present: bool = False,
+        recent_news_model: str = "perplexity/sonar",
+        recent_news_temperature: float = 0.2,
+        recent_news_max_tokens: int = 2500,
+    ) -> None:
+        """Run Perplexity present timelines and recent news only."""
+        run_present_timeline_perplexity_pipeline(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
+            model=present_model,
+            temperature=present_temperature,
+            max_tokens=present_max_tokens,
+            current_date=present_current_date,
+            force_present=force_present,
+        )
+        run_recent_news_timeline_pipeline(
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
+            model=recent_news_model,
+            temperature=recent_news_temperature,
+            max_tokens=recent_news_max_tokens,
         )
 
     def run_future_timeline_perplexity(
@@ -134,9 +269,9 @@ class CLI:
     ) -> None:
         """Generate future timelines from Perplexity present timelines only."""
         run_future_timeline_perplexity_pipeline(
-            active_event_groups_path=active_event_groups_path,
-            events_path=events_path,
-            storage_dir=storage_dir,
+            active_event_groups_path=Path(active_event_groups_path),
+            events_path=Path(events_path),
+            storage_dir=Path(storage_dir),
             timeline_models=timeline_models,
             timeline_temps=timeline_temps,
             timeline_rollouts=timeline_rollouts,
