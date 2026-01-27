@@ -29,6 +29,39 @@ def build_simple_wiki_timeline_prompt(
     )
 
 
+class SimpleWikiWorkspace:
+    """Track planning workspace for the simple wiki timeline agent."""
+
+    def __init__(self, topic: str) -> None:
+        """Initialize the workspace with the root topic."""
+        self.topic = topic
+        self.topics: list[str] = []
+        self.entities: list[str] = []
+        self.fetched_pages: list[str] = []
+        self.gaps: list[str] = []
+        self.notes: list[str] = []
+
+    def apply_update(self, update: dict) -> None:
+        """Apply a structured update to the workspace."""
+        for key in ("topics", "entities", "fetched_pages", "gaps", "notes"):
+            if key in update:
+                getattr(self, key).extend(update[key])
+
+    def snapshot(self) -> str:
+        """Return a JSON snapshot of the workspace for prompting."""
+        return json.dumps(
+            {
+                "topic": self.topic,
+                "topics": self.topics,
+                "entities": self.entities,
+                "fetched_pages": self.fetched_pages,
+                "gaps": self.gaps,
+                "notes": self.notes,
+            },
+            ensure_ascii=True,
+        )
+
+
 class SimpleWikiTimelineAgent:
     """Tool-calling agent that builds present timelines from Wikipedia sources."""
 
@@ -61,10 +94,9 @@ class SimpleWikiTimelineAgent:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "term": {"type": "string"},
-                            "n_results": {"type": "integer"},
+                            "query": {"type": "string"},
                         },
-                        "required": ["term", "n_results"],
+                        "required": ["query"],
                     },
                 },
             },
@@ -75,8 +107,8 @@ class SimpleWikiTimelineAgent:
                     "description": "Fetch a Wikipedia page and return its markdown content.",
                     "parameters": {
                         "type": "object",
-                        "properties": {"title": {"type": "string"}},
-                        "required": ["title"],
+                        "properties": {"page": {"type": "string"}},
+                        "required": ["page"],
                     },
                 },
             },
@@ -95,8 +127,29 @@ class SimpleWikiTimelineAgent:
             {
                 "type": "function",
                 "function": {
+                    "name": "workspace_update",
+                    "description": (
+                        "Update the planning workspace with new topics, entities, fetched pages, or gaps."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "topics": {"type": "array", "items": {"type": "string"}},
+                            "entities": {"type": "array", "items": {"type": "string"}},
+                            "fetched_pages": {"type": "array", "items": {"type": "string"}},
+                            "gaps": {"type": "array", "items": {"type": "string"}},
+                            "notes": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "final_answer",
-                    "description": "Return the final timeline in markdown.",
+                    "description": (
+                        "Return the final timeline in markdown under the `answer` field."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {"answer": {"type": "string"}},
@@ -106,11 +159,28 @@ class SimpleWikiTimelineAgent:
             },
         ]
 
-    def _handle_wikipedia_search(self, term: str, n_results: int) -> str:
+    def _think_only_tool_definitions(self) -> list[dict]:
+        """Return tool schema restricted to the think tool."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "think",
+                    "description": "Record a brief reflection about findings and next steps.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"thoughts": {"type": "string"}},
+                        "required": ["thoughts"],
+                    },
+                },
+            }
+        ]
+
+    def _handle_wikipedia_search(self, query: str) -> str:
         """Run Wikipedia search and return results as JSON."""
-        logging.info("Simple wiki tool wikipedia_search starting term=%s", term)
+        logging.info("Simple wiki tool wikipedia_search starting query=%s", query)
         started_at = time.perf_counter()
-        results = self.wiki.search_wikipedia_pages(term, n_results)
+        results = self.wiki.search_wikipedia_pages(query, 5)
         elapsed = time.perf_counter() - started_at
         logging.info(
             "Simple wiki tool wikipedia_search completed seconds=%.2f results=%s",
@@ -119,11 +189,11 @@ class SimpleWikiTimelineAgent:
         )
         return json.dumps(results, ensure_ascii=True)
 
-    def _handle_wikipedia_page(self, title: str) -> str:
+    def _handle_wikipedia_page(self, page: str) -> str:
         """Fetch a Wikipedia page and return markdown content."""
-        logging.info("Simple wiki tool wikipedia_page starting title=%s", title)
+        logging.info("Simple wiki tool wikipedia_page starting page=%s", page)
         started_at = time.perf_counter()
-        content = self.wiki.get_wikipedia_page(title)
+        content = self.wiki.get_wikipedia_page(page)
         elapsed = time.perf_counter() - started_at
         logging.info(
             "Simple wiki tool wikipedia_page completed seconds=%.2f chars=%s",
@@ -136,6 +206,23 @@ class SimpleWikiTimelineAgent:
         """Record tool-based reflection for tracing."""
         logging.info("Simple wiki tool think called thoughts=%s", thoughts)
         return "Reflection recorded."
+
+    def _handle_workspace_update(self, update: dict) -> str:
+        """Apply an update to the workspace and return a summary."""
+        logging.info("Simple wiki tool workspace_update starting")
+        started_at = time.perf_counter()
+        self.workspace.apply_update(update)
+        elapsed = time.perf_counter() - started_at
+        logging.info(
+            "Simple wiki tool workspace_update completed seconds=%.2f topics=%s entities=%s fetched_pages=%s gaps=%s notes=%s",
+            elapsed,
+            len(self.workspace.topics),
+            len(self.workspace.entities),
+            len(self.workspace.fetched_pages),
+            len(self.workspace.gaps),
+            len(self.workspace.notes),
+        )
+        return "Workspace updated."
 
     def _append_tool_message(
         self,
@@ -163,15 +250,16 @@ class SimpleWikiTimelineAgent:
             arguments = json.loads(call.function.arguments)
             logging.info("Simple wiki tool call received name=%s", tool_name)
             if tool_name == "wikipedia_search":
-                content = self._handle_wikipedia_search(
-                    arguments["term"], arguments["n_results"]
-                )
+                content = self._handle_wikipedia_search(arguments["query"])
                 self._append_tool_message(messages, call.id, content)
             elif tool_name == "wikipedia_page":
-                content = self._handle_wikipedia_page(arguments["title"])
+                content = self._handle_wikipedia_page(arguments["page"])
                 self._append_tool_message(messages, call.id, content)
             elif tool_name == "think":
                 content = self._handle_think(arguments["thoughts"])
+                self._append_tool_message(messages, call.id, content)
+            elif tool_name == "workspace_update":
+                content = self._handle_workspace_update(arguments)
                 self._append_tool_message(messages, call.id, content)
             elif tool_name == "final_answer":
                 return arguments["answer"]
@@ -194,23 +282,32 @@ class SimpleWikiTimelineAgent:
         system_message = (
             "You are a research agent assembling a factual, date-ordered timeline. "
             "Use wikipedia_search and wikipedia_page to gather evidence. "
-            "Call think to reflect on gaps. "
-            "When finished, call final_answer with the markdown timeline only."
+            "Maintain the planning workspace using workspace_update with topics, entities, fetched pages, and gaps. "
+            "After any wikipedia_page tool calls, call think with a brief gap analysis before doing more retrieval. "
+            "When finished, call final_answer with the markdown timeline in the `answer` field only."
         )
         messages: list[dict] = [
             {"role": "system", "content": system_message},
             {"role": "user", "content": prompt},
         ]
-        tools_schema = self._tool_definitions()
         token_budget = self.max_tokens
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         started_at = time.perf_counter()
         final_answer = None
+        force_think = False
+        max_retries = 3
+        retry_delay_seconds = 1.0
+        self.workspace = SimpleWikiWorkspace(topic_pertaining_to)
 
         logging.info("Simple wiki timeline agent starting topic=%s", topic_pertaining_to)
         for step in range(1, self.max_iters + 1):
             remaining_tokens = token_budget - total_usage["total_tokens"]
             percent_used = (total_usage["total_tokens"] / token_budget) * 100
+            tools_schema = (
+                self._think_only_tool_definitions()
+                if force_think
+                else self._tool_definitions()
+            )
             messages.append(
                 {
                     "role": "system",
@@ -219,31 +316,72 @@ class SimpleWikiTimelineAgent:
                         f"{remaining_tokens} total tokens remain in the configured budget. "
                         f"Budget used: {percent_used:.1f}%. "
                         f"Steps completed: {step - 1} of {self.max_iters}.\n"
-                        "Be concise and prioritize the most important and recent events."
+                        "Be concise and prioritize the most important and recent events. "
+                        "If finished, call final_answer with JSON: {\"answer\": \"...\"}."
                     ),
                 }
             )
-            logging.info("Simple wiki timeline LLM call starting step=%s", step)
-            step_started_at = time.perf_counter()
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=tools_schema,
-                tool_choice="auto",
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-            step_elapsed = time.perf_counter() - step_started_at
-            if completion is None or completion.choices is None:
-                payload = None
-                if completion is not None and hasattr(completion, "model_dump"):
-                    payload = completion.model_dump()
-                logging.error(
-                    "Simple wiki timeline missing choices step=%s payload=%s",
-                    step,
-                    payload,
+            #messages.append(
+            #    {
+            #        "role": "system",
+            #        "content": (
+            #            "Workspace snapshot (JSON): "
+            #            f"{self.workspace.snapshot()}\n"
+            #            "Use workspace_update to add topics, entities, fetched pages, or gaps."
+            #        ),
+            #    }
+            #)
+            if force_think:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "You must call think now with a short gap analysis "
+                            "(e.g., missing last 90 days, missing subtopic)."
+                        ),
+                    }
                 )
-                raise RuntimeError("OpenRouter response missing choices.")
+            logging.info("Simple wiki timeline LLM call starting step=%s", step)
+            completion = None
+            last_error: Exception | None = None
+            for attempt in range(1, max_retries + 1):
+                step_started_at = time.perf_counter()
+                try:
+                    completion = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        tools=tools_schema,
+                        tool_choice="required",
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+                    if completion is None or completion.choices is None:
+                        payload = None
+                        if completion is not None and hasattr(completion, "model_dump"):
+                            payload = completion.model_dump()
+                        logging.error(
+                            "Simple wiki timeline missing choices step=%s attempt=%s payload=%s",
+                            step,
+                            attempt,
+                            payload,
+                        )
+                        raise RuntimeError("OpenRouter response missing choices.")
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    step_elapsed = time.perf_counter() - step_started_at
+                    logging.warning(
+                        "Simple wiki timeline LLM call failed step=%s attempt=%s seconds=%.2f error=%s",
+                        step,
+                        attempt,
+                        step_elapsed,
+                        exc,
+                    )
+                    if attempt < max_retries:
+                        time.sleep(retry_delay_seconds * (2 ** (attempt - 1)))
+            if completion is None or completion.choices is None:
+                raise RuntimeError("OpenRouter response missing choices.") from last_error
+            step_elapsed = time.perf_counter() - step_started_at
             message = completion.choices[0].message
             usage = completion.usage
             if usage is not None:
@@ -314,6 +452,19 @@ class SimpleWikiTimelineAgent:
                 final_answer = self._execute_tool_calls(message.tool_calls, messages)
                 if final_answer is not None:
                     break
+                saw_think = any(
+                    call.function.name == "think" for call in message.tool_calls
+                )
+                saw_page = any(
+                    call.function.name == "wikipedia_page"
+                    for call in message.tool_calls
+                )
+                if force_think and not saw_think:
+                    logging.warning(
+                        "Simple wiki timeline expected think tool call but did not receive it step=%s",
+                        step,
+                    )
+                force_think = saw_page and not saw_think
                 continue
             if message.content:
                 logging.warning(
