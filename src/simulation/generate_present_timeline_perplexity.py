@@ -47,6 +47,7 @@ def generate_present_timeline_perplexity(
     )
     elapsed = time.perf_counter() - started_at
     timeline = completion.choices[0].message.content
+    usage = completion.usage
     logging.info(
         "Perplexity timeline generation completed seconds=%.2f chars=%s",
         elapsed,
@@ -67,6 +68,11 @@ def generate_present_timeline_perplexity(
             "pipeline_run_id": run_id,
             "event_group_id": event_group_id,
             "stage": "perplexity",
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens if usage is not None else None,
+                "completion_tokens": usage.completion_tokens if usage is not None else None,
+                "total_tokens": usage.total_tokens if usage is not None else None,
+            },
         },
         duration_seconds=elapsed,
     )
@@ -75,4 +81,10 @@ def generate_present_timeline_perplexity(
         "timeline": timeline,
         "model": model,
         "current_date": current_date,
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens if usage is not None else None,
+            "completion_tokens": usage.completion_tokens if usage is not None else None,
+            "total_tokens": usage.total_tokens if usage is not None else None,
+        },
+        "elapsed_seconds": elapsed,
     }
